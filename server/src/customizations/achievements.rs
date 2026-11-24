@@ -167,13 +167,14 @@ pub async fn earned_for_profile(
 /// `battlesnake_id` is the winning/linked snake's id; the participants
 /// query inner-joins `battlesnakes` on the coalesced id, so it is never
 /// NULL at runtime.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Provenance {
     game_id: Uuid,
     battlesnake_id: Uuid,
+    snake_name: String,
 }
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 struct WinFlags {
     first: bool,
     constrictor: bool,
@@ -204,23 +205,23 @@ impl WinFlags {
     ) {
         self.ladder |= ladder;
         if ladder && self.ladder_provenance.is_none() {
-            self.ladder_provenance = Some(provenance);
+            self.ladder_provenance = Some(provenance.clone());
         }
         // A shared first place is a draw, not a win.
         if placement == Some(1) && first_places == 1 && participants >= 2 {
             if self.first_win_provenance.is_none() {
-                self.first_win_provenance = Some(provenance);
+                self.first_win_provenance = Some(provenance.clone());
             }
             if game_type == GameType::Constrictor.as_str() {
                 self.constrictor = true;
                 if self.constrictor_provenance.is_none() {
-                    self.constrictor_provenance = Some(provenance);
+                    self.constrictor_provenance = Some(provenance.clone());
                 }
             }
             if participants >= 4 {
                 self.crowd = true;
                 if self.crowd_provenance.is_none() {
-                    self.crowd_provenance = Some(provenance);
+                    self.crowd_provenance = Some(provenance.clone());
                 }
             }
             if ladder {
@@ -239,11 +240,11 @@ impl WinFlags {
     /// (or ladder-winning) row, earliest-first under the reconcile ORDER BY.
     fn provenance_for(&self, achievement: Achievement) -> Option<Provenance> {
         match achievement {
-            Achievement::FirstWin => self.first_win_provenance,
-            Achievement::ConstrictorChamp => self.constrictor_provenance,
-            Achievement::CrowdPleaser => self.crowd_provenance,
-            Achievement::SlowAndSteady => self.ladder_provenance,
-            Achievement::LadderRegular => self.ladder_win_provenance,
+            Achievement::FirstWin => self.first_win_provenance.clone(),
+            Achievement::ConstrictorChamp => self.constrictor_provenance.clone(),
+            Achievement::CrowdPleaser => self.crowd_provenance.clone(),
+            Achievement::SlowAndSteady => self.ladder_provenance.clone(),
+            Achievement::LadderRegular => self.ladder_win_provenance.clone(),
         }
     }
 }
@@ -259,7 +260,7 @@ struct AwardResult {
 }
 
 /// A live earn recorded with provenance; drives the Eyes event.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct EarnedEvent {
     achievement: Achievement,
     first: bool,
@@ -547,7 +548,7 @@ async fn verified_live_provenance(
     conn: &mut PgConnection,
     user_id: Uuid,
     achievement: Achievement,
-    live: Option<WinFlags>,
+    live: Option<&WinFlags>,
 ) -> cja::Result<Option<Provenance>> {
     let Some(flags) = live else {
         return Ok(None);
@@ -561,7 +562,7 @@ async fn verified_live_provenance(
         } else {
             count_rule_satisfied(&mut *conn, user_id, achievement)
                 .await?
-                .then_some(flags.ladder_provenance)
+                .then(|| flags.ladder_provenance.clone())
                 .flatten()
         }),
         Achievement::LadderRegular => Ok(if !flags.ladder_win {
@@ -569,7 +570,7 @@ async fn verified_live_provenance(
         } else {
             count_rule_satisfied(&mut *conn, user_id, achievement)
                 .await?
-                .then_some(flags.ladder_win_provenance)
+                .then(|| flags.ladder_win_provenance.clone())
                 .flatten()
         }),
     }
@@ -604,27 +605,27 @@ async fn award_owner(
             continue;
         }
         let earned = match achievement {
-            Achievement::FirstWin => match live {
+            Achievement::FirstWin => match live.as_ref() {
                 Some(flags) => flags.first,
                 None => historical_win(&mut *conn, user_id, 2, false).await?,
             },
-            Achievement::ConstrictorChamp => match live {
+            Achievement::ConstrictorChamp => match live.as_ref() {
                 Some(flags) => flags.constrictor,
                 None => historical_win(&mut *conn, user_id, 2, true).await?,
             },
-            Achievement::CrowdPleaser => match live {
+            Achievement::CrowdPleaser => match live.as_ref() {
                 Some(flags) => flags.crowd,
                 None => historical_win(&mut *conn, user_id, 4, false).await?,
             },
             Achievement::SlowAndSteady => {
-                if !live.is_none_or(|flags| flags.ladder) {
+                if !live.as_ref().is_none_or(|flags| flags.ladder) {
                     false
                 } else {
                     count_rule_satisfied(&mut *conn, user_id, achievement).await?
                 }
             }
             Achievement::LadderRegular => {
-                if !live.is_none_or(|flags| flags.ladder_win) {
+                if !live.as_ref().is_none_or(|flags| flags.ladder_win) {
                     false
                 } else {
                     count_rule_satisfied(&mut *conn, user_id, achievement).await?
@@ -673,7 +674,7 @@ async fn award_owner(
         .begin()
         .await
         .wrap_err("Failed to open earn savepoint")?;
-    match record_earns(&mut savepoint, user_id, &existing, live, &fired).await {
+    match record_earns(&mut savepoint, user_id, &existing, live.as_ref(), &fired).await {
         Ok(events) => {
             savepoint
                 .commit()
@@ -707,7 +708,7 @@ async fn record_earns(
     conn: &mut PgConnection,
     user_id: Uuid,
     existing: &[ExistingGrant],
-    live: Option<WinFlags>,
+    live: Option<&WinFlags>,
     fired: &[Achievement],
 ) -> cja::Result<Vec<EarnedEvent>> {
     let mut events = Vec::new();
@@ -745,13 +746,11 @@ async fn record_earns(
             continue;
         }
         if fired.contains(&achievement) {
-            match live
-                .as_ref()
-                .and_then(|flags| flags.provenance_for(achievement))
-            {
+            match live.and_then(|flags| flags.provenance_for(achievement)) {
                 Some(provenance) => {
                     if let Some((_earn_id, first)) =
-                        record_live_earn(&mut *conn, user_id, achievement, provenance).await?
+                        record_live_earn(&mut *conn, user_id, achievement, provenance.clone())
+                            .await?
                     {
                         events.push(EarnedEvent {
                             achievement,
@@ -789,7 +788,7 @@ async fn record_earns(
             && let Some(provenance) =
                 verified_live_provenance(&mut *conn, user_id, achievement, live).await?
             && let Some((_earn_id, first)) =
-                record_live_earn(&mut *conn, user_id, achievement, provenance).await?
+                record_live_earn(&mut *conn, user_id, achievement, provenance.clone()).await?
         {
             events.push(EarnedEvent {
                 achievement,
@@ -805,16 +804,19 @@ async fn record_earns(
 /// transaction commits, so a rolled-back award never emits. Non-live
 /// (backfill/grant-dated) records never emit.
 fn emit_earned_event(user_id: Uuid, event: &EarnedEvent) {
-    tracing::info!(
-        event_type = "achievement_earned",
-        user_id = %user_id,
-        slug = event.achievement.slug(),
-        kind = event.achievement.kind(),
-        live = true,
-        first = event.first,
-        game_id = %event.provenance.game_id,
-        battlesnake_id = %event.provenance.battlesnake_id,
-        "Achievement earned"
+    cja::product_event!(
+        name: "achievement_earned",
+        user_id: Some(&user_id),
+        message: "Achievement earned",
+        properties: {
+            slug = event.achievement.slug(),
+            kind = event.achievement.kind(),
+            live = true,
+            first = event.first,
+            game_id = %event.provenance.game_id,
+            battlesnake_id = %event.provenance.battlesnake_id,
+            snake_name = %event.provenance.snake_name,
+        }
     );
 }
 
@@ -834,7 +836,7 @@ pub async fn award_for_game(pool: &PgPool, game_id: Uuid, base_url: &str) -> cja
         return Ok(0);
     };
     let rows = sqlx::query!(
-        r#"SELECT bs.user_id, gb.placement, gb.leaderboard_entry_id,
+        r#"SELECT bs.user_id, bs.name AS snake_name, gb.placement, gb.leaderboard_entry_id,
                   COALESCE(gb.battlesnake_id, le.battlesnake_id) AS "snake_id!"
            FROM game_battlesnakes gb
            LEFT JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id
@@ -858,6 +860,7 @@ pub async fn award_for_game(pool: &PgPool, game_id: Uuid, base_url: &str) -> cja
             Provenance {
                 game_id,
                 battlesnake_id: row.snake_id,
+                snake_name: row.snake_name,
             },
         );
     }
@@ -1060,7 +1063,7 @@ pub async fn reconcile_recent_achievements(pool: &PgPool) -> cja::Result<u64> {
         .await
         .wrap_err("Failed to begin achievement reconciliation")?;
     let rows = sqlx::query!(
-        r#"SELECT g.game_id, g.game_type, bs.user_id, gb.placement, gb.leaderboard_entry_id,
+        r#"SELECT g.game_id, g.game_type, bs.user_id, bs.name AS snake_name, gb.placement, gb.leaderboard_entry_id,
             COALESCE(gb.battlesnake_id, le.battlesnake_id) AS "snake_id!",
             (SELECT COUNT(*) FROM game_battlesnakes peer WHERE peer.game_id = g.game_id) AS "participants!",
             (SELECT COUNT(*) FROM game_battlesnakes peer WHERE peer.game_id = g.game_id AND peer.placement = 1) AS "first_places!"
@@ -1093,6 +1096,7 @@ pub async fn reconcile_recent_achievements(pool: &PgPool) -> cja::Result<u64> {
             Provenance {
                 game_id: row.game_id,
                 battlesnake_id: row.snake_id,
+                snake_name: row.snake_name,
             },
         );
     }
@@ -1130,7 +1134,7 @@ mod tests {
 
     async fn user(pool: &PgPool, number: i64) -> Uuid {
         sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES ($1, $2, '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login) VALUES ($1, $2) RETURNING user_id",
         )
         .bind(number)
         .bind(format!("achievement-{number}"))
@@ -1163,7 +1167,7 @@ mod tests {
 
     async fn entry(pool: &PgPool, snake_id: Uuid) -> Uuid {
         sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id) VALUES ((SELECT leaderboard_id FROM leaderboards LIMIT 1), $1) RETURNING leaderboard_entry_id",
+            "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id) SELECT leaderboard_id, (SELECT season_id FROM leaderboard_seasons s WHERE s.leaderboard_id = leaderboards.leaderboard_id), $1 FROM leaderboards LIMIT 1 RETURNING leaderboard_entry_id",
         ).bind(snake_id).fetch_one(pool).await.unwrap()
     }
 
@@ -2080,7 +2084,7 @@ mod tests {
             let mut conn = pool.acquire().await.unwrap();
             let start = Instant::now();
             assert_eq!(
-                award_owner(&mut conn, owner, Some(flags))
+                award_owner(&mut conn, owner, Some(flags.clone()))
                     .await
                     .unwrap()
                     .inserted,
@@ -2091,7 +2095,7 @@ mod tests {
             for _ in 0..20 {
                 let start = Instant::now();
                 assert_eq!(
-                    award_owner(&mut conn, owner, Some(flags))
+                    award_owner(&mut conn, owner, Some(flags.clone()))
                         .await
                         .unwrap()
                         .inserted,
@@ -2459,6 +2463,7 @@ mod tests {
         let events = crate::test_capture::Capture::shared().events("achievement_earned", owner);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["slug"], "first_win");
+        assert_eq!(events[0]["snake_name"], "provenance winner");
         assert_eq!(events[0]["kind"], "getting_started");
         assert_eq!(events[0]["live"], "true");
         assert_eq!(events[0]["first"], "true");
@@ -3084,6 +3089,7 @@ mod tests {
         let events = crate::test_capture::Capture::shared().events("achievement_earned", owner);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["slug"], "slow_and_steady");
+        assert_eq!(events[0]["snake_name"], "reconcile turtle");
         let after: (i64, i64, i64) = sqlx::query_as(
             "SELECT (SELECT COUNT(*) FROM notifications), \
                     (SELECT COUNT(*) FROM notification_emails), \

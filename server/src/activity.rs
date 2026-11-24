@@ -50,7 +50,7 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn records_once_per_day_and_preserves_reservation_after_failure(db: PgPool) {
         let user_id = sqlx::query_scalar!(
-            "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (1, 'active', '') RETURNING user_id"
+            "INSERT INTO users(external_github_id, github_login) VALUES (1, 'active') RETURNING user_id"
         ).fetch_one(&db).await.unwrap();
         let recorder = ActivityRecorder::default();
         let day = Utc::now().date_naive();
@@ -79,7 +79,7 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn stalled_insert_times_out_without_retrying(db: PgPool) {
         let user_id = sqlx::query_scalar!(
-            "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (1, 'timed-out', '') RETURNING user_id"
+            "INSERT INTO users(external_github_id, github_login) VALUES (1, 'timed-out') RETURNING user_id"
         ).fetch_one(&db).await.unwrap();
         let mut lock = db.begin().await.unwrap();
         sqlx::query!("LOCK TABLE user_activity_days IN ACCESS EXCLUSIVE MODE")

@@ -16,7 +16,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
 use crate::{
     github::auth::GitHubOAuthConfig,
     models::session::{self, SESSION_COOKIE_NAME},
-    routes::test_support::signed_session_cookie,
+    routes::test_support::{create_user_session, signed_session_cookie},
     state::AppState,
 };
 
@@ -219,6 +219,216 @@ async fn cli_token_route_is_gone(pool: PgPool) {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+/// DEV-2185: login rotates the session — new id, old row deleted, fresh
+/// 30-day cookie re-issued on the response, saved post-login redirect
+/// carried, form draft deliberately NOT carried.
+#[sqlx::test(migrations = "../migrations")]
+async fn web_login_rotates_session_and_reissues_cookie(pool: PgPool) {
+    let github = github_mocks().await;
+    let fx = Fixture::new(pool.clone(), &github, false).await;
+
+    // Park state on the OLD session: a saved redirect plus a sentinel form
+    // draft (nothing clears it before login, so its absence on the new row
+    // pins rotation's own omission).
+    session::set_post_login_redirect(&pool, fx.session_id, "/welcome-back".to_string())
+        .await
+        .unwrap();
+    session::set_error_flash_with_form_data(
+        &pool,
+        fx.session_id,
+        "validation failed".to_string(),
+        serde_json::json!({"name": "sentinel"}),
+    )
+    .await
+    .unwrap();
+
+    let response = fx.app.clone().oneshot(fx.callback_request()).await.unwrap();
+
+    // The redirect was carried by rotation and consumed by the callback.
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()[header::LOCATION], "/welcome-back");
+
+    // Find the rotated row.
+    let new_session_id: Uuid = sqlx::query_scalar!(
+        "SELECT s.session_id FROM sessions s
+         JOIN users u ON u.user_id = s.user_id
+         WHERE u.external_github_id = $1
+         ORDER BY s.created_at DESC
+         LIMIT 1",
+        MOCK_GITHUB_ID
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_ne!(new_session_id, fx.session_id, "login must rotate the id");
+
+    let rotated = session::get_active_session_by_id(&pool, new_session_id)
+        .await
+        .unwrap()
+        .expect("rotated session exists");
+    assert!(rotated.user_id.is_some());
+    assert!(rotated.expires_at > chrono::Utc::now() + chrono::Duration::days(29));
+    let (redirect, draft): (Option<String>, Option<serde_json::Value>) = sqlx::query_as(
+        "SELECT post_login_redirect::text, pending_form_data::jsonb FROM sessions WHERE session_id = $1",
+    )
+    .bind(new_session_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        redirect.is_none(),
+        "redirect consumed by the callback: {redirect:?}"
+    );
+    assert!(draft.is_none(), "form draft must NOT carry across rotation");
+
+    // The old row is gone.
+    let old: i64 = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "count!: i64" FROM sessions WHERE session_id = $1"#,
+        fx.session_id
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(old, 0);
+
+    // A fresh cookie naming the new session rides the response.
+    let set_cookie = response
+        .headers()
+        .get(header::SET_COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .expect("session Set-Cookie on login");
+    assert!(set_cookie.starts_with("arena_session_id="), "{set_cookie}");
+    assert!(set_cookie.contains("Max-Age=2592000"), "{set_cookie}");
+    assert!(set_cookie.contains("Path=/"), "{set_cookie}");
+    let parsed = tower_cookies::Cookie::parse(set_cookie.to_string()).unwrap();
+    let cookies = tower_cookies::Cookies::default();
+    // The Set-Cookie value is ALREADY encrypted by the server. Add it to
+    // the plain jar so it is stored as-is; only the private `.get` below
+    // decrypts. (Going through `private(...).add` would encrypt it a
+    // second time and the read would return ciphertext — PR review r1.)
+    cookies.add(parsed);
+    let decoded = cookies
+        .private(&fx.state.cookie_key.0)
+        .get(SESSION_COOKIE_NAME)
+        .expect("decodable signed cookie");
+    assert_eq!(decoded.value(), new_session_id.to_string());
+
+    // The rotation actually logged the browser in: /me renders the mock
+    // user's login when driven with the new session id.
+    let cookie = signed_session_cookie(&fx.state, new_session_id);
+    let response = fx
+        .app
+        .clone()
+        .oneshot(
+            Request::get("/me")
+                .header(header::COOKIE, format!("{SESSION_COOKIE_NAME}={cookie}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_string(response).await;
+    assert!(body.contains("cli-login"), "{body}");
+}
+
+/// DEV-2185: a failed sign-out must not show "You have been logged out".
+/// The trigger scopes the failure to the sign-out transition ONLY
+/// (user_id -> NULL): set_flash_message is also an UPDATE on sessions and
+/// must keep working — that's what makes this test discriminate.
+#[sqlx::test(migrations = "../migrations")]
+async fn logout_failure_logs_and_shows_no_success_flash(pool: PgPool) {
+    let state = AppState::test_from_pool(pool.clone());
+    let app = crate::routes::routes(state.clone())
+        .expect("asset router")
+        .into_router();
+    let session_id = create_user_session(&pool, 424243, false).await;
+    let cookie = signed_session_cookie(&state, session_id);
+
+    sqlx::query(
+        "CREATE FUNCTION sessions_signout_boom() RETURNS trigger AS $$
+         BEGIN RAISE EXCEPTION 'boom'; END $$ LANGUAGE plpgsql",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_sessions_signout BEFORE UPDATE ON sessions
+         FOR EACH ROW
+         WHEN (OLD.user_id IS NOT NULL AND NEW.user_id IS NULL)
+         EXECUTE FUNCTION sessions_signout_boom()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/auth/logout")
+                .header(header::COOKIE, format!("{SESSION_COOKIE_NAME}={cookie}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()[header::LOCATION], "/");
+
+    // Sign-out really failed, and no success flash was written.
+    let (user_id, flash): (Option<Uuid>, Option<String>) =
+        sqlx::query_as("SELECT user_id::uuid, flash_message FROM sessions WHERE session_id = $1")
+            .bind(session_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        user_id.is_some(),
+        "sign-out failed, user must still be attached"
+    );
+    assert_eq!(
+        flash, None,
+        "no 'You have been logged out' flash on failure"
+    );
+}
+
+/// DEV-2185 happy-path sibling: a successful logout clears the user, the
+/// form draft, and writes the flash.
+#[sqlx::test(migrations = "../migrations")]
+async fn logout_success_writes_flash(pool: PgPool) {
+    let state = AppState::test_from_pool(pool.clone());
+    let app = crate::routes::routes(state.clone())
+        .expect("asset router")
+        .into_router();
+    let session_id = create_user_session(&pool, 424244, false).await;
+    let cookie = signed_session_cookie(&state, session_id);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/auth/logout")
+                .header(header::COOKIE, format!("{SESSION_COOKIE_NAME}={cookie}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()[header::LOCATION], "/");
+
+    let (user_id, flash, draft): (Option<Uuid>, Option<String>, Option<serde_json::Value>) =
+        sqlx::query_as(
+            "SELECT user_id::uuid, flash_message, pending_form_data::jsonb FROM sessions WHERE session_id = $1",
+        )
+        .bind(session_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(user_id.is_none());
+    assert_eq!(flash.as_deref(), Some("You have been logged out"));
+    assert!(draft.is_none());
+}
+
 #[sqlx::test(migrations = "../migrations")]
 async fn web_callback_still_redirects_home(pool: PgPool) {
     let github = github_mocks().await;
@@ -266,6 +476,8 @@ async fn user_authenticated_event_carries_new_user(pool: PgPool) {
         Some("true"),
         "{events:?}"
     );
+    assert_eq!(events[0].get("auth_type").map(String::as_str), Some("web"));
+    assert!(!events[0].contains_key("github_login"));
 
     // Second callback for the same GitHub identity: a fresh session+state,
     // but an existing user.
@@ -285,4 +497,62 @@ async fn user_authenticated_event_carries_new_user(pool: PgPool) {
         Some("false"),
         "{events:?}"
     );
+    assert_eq!(events[1].get("auth_type").map(String::as_str), Some("web"));
+    assert!(!events[1].contains_key("github_login"));
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn github_callback_auto_claim_emits_play_claim_event(pool: PgPool) {
+    let capture = crate::test_capture::Capture::shared();
+    let github = github_mocks().await;
+    let fx = Fixture::new(pool.clone(), &github, false).await;
+
+    let imported_account_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO imported_accounts (play_user_id, play_account_id, email, username, github_uid)
+         VALUES ('github-auto-claim', 'github-auto-claim', 'play-auto@example.com', 'play-auto', $1)
+         RETURNING imported_account_id",
+    )
+    .bind(MOCK_GITHUB_ID)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO imported_snakes (imported_account_id, play_snake_id, name, url)
+         VALUES ($1, 'github-auto-snake', 'Auto Snake', 'https://example.com/snake')",
+    )
+    .bind(imported_account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO imported_grants (imported_account_id, customization_type, slug)
+         VALUES ($1, 'head', 'alligator')",
+    )
+    .bind(imported_account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let response = fx.app.clone().oneshot(fx.callback_request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let user_id: Uuid =
+        sqlx::query_scalar("SELECT user_id FROM users WHERE external_github_id = $1")
+            .bind(MOCK_GITHUB_ID)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let claimed_by: Option<Uuid> = sqlx::query_scalar(
+        "SELECT claimed_by_user_id FROM imported_accounts WHERE imported_account_id = $1",
+    )
+    .bind(imported_account_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(claimed_by, Some(user_id));
+
+    let events = capture.events("play_claim_succeeded", user_id);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].get("snakes").map(String::as_str), Some("1"));
+    assert_eq!(events[0].get("grants").map(String::as_str), Some("1"));
+    assert!(!events[0].contains_key("play_username"));
 }

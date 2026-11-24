@@ -110,11 +110,13 @@ async fn extract_window(
     // 4. Entries (needed to filter start_ratings and for throne walks).
     let entry_rows = sqlx::query!(
         r#"
-        SELECT e.leaderboard_entry_id, e.leaderboard_id, e.disabled_at,
+        SELECT e.leaderboard_entry_id, e.leaderboard_id, r.disabled_at,
                b.name AS snake_name, u.github_login AS "owner_login?"
         FROM leaderboard_entries e
         JOIN leaderboards l USING (leaderboard_id)
         JOIN battlesnakes b USING (battlesnake_id)
+        JOIN leaderboard_registrations r
+          ON r.leaderboard_id = e.leaderboard_id AND r.battlesnake_id = e.battlesnake_id
         LEFT JOIN users u ON u.user_id = b.user_id
         WHERE l.visibility = 'public'
         "#

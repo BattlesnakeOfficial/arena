@@ -1,5 +1,5 @@
 import { test, expect } from '../fixtures/test';
-import { query } from '../fixtures/db';
+import { query, registerFixtureEntries } from '../fixtures/db';
 
 test('public snake search is literal, case-insensitive, paginated, and excludes private snakes', async ({ authenticatedPage, mockUser, page }) => {
   const term = `Find ${Date.now()} 100%_&+ café`;
@@ -51,8 +51,8 @@ test('player search preserves its query across filters and pages and searches ha
   const term = `Player ${Date.now()} 100%_&+ café`;
   const loginPrefix = `lookup-${Date.now()}`;
   const users = await query<{ user_id: string }>(
-    `INSERT INTO users (external_github_id, github_login, github_access_token, display_name)
-     SELECT $1::bigint + i, $2 || '-' || i, 'test-token', $3 || ' ' || to_char(i, 'FM000')
+    `INSERT INTO users (external_github_id, github_login, display_name)
+     SELECT $1::bigint + i, $2 || '-' || i, $3 || ' ' || to_char(i, 'FM000')
      FROM generate_series(1, 52) i RETURNING user_id`,
     [Date.now() * 1000 + 700_000, loginPrefix, term],
   );
@@ -66,11 +66,13 @@ test('player search preserves its query across filters and pages and searches ha
       [ids, `${loginPrefix}-52`],
     );
     await query(
-      `INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-       SELECT l.leaderboard_id, b.battlesnake_id FROM battlesnakes b CROSS JOIN leaderboards l
+      `INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+       SELECT l.leaderboard_id, (SELECT season_id FROM leaderboard_seasons s WHERE s.leaderboard_id = l.leaderboard_id), b.battlesnake_id
+       FROM battlesnakes b CROSS JOIN leaderboards l
        WHERE b.user_id = ANY($1::uuid[]) AND l.name = 'Standard 11x11'`,
       [ids],
     );
+    await registerFixtureEntries();
     await page.goto('/players?page=99999&q=no-such-launch-player');
     await page.getByRole('searchbox', { name: 'Search players' }).fill(`  ${term.toUpperCase()}  `);
     await page.getByRole('button', { name: 'Search', exact: true }).click();

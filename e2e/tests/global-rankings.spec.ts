@@ -1,5 +1,5 @@
 import { test, expect } from '../fixtures/test';
-import { query } from '../fixtures/db';
+import { query, registerFixtureEntries } from '../fixtures/db';
 import { mkdirSync } from 'node:fs';
 
 async function capture(page: import('@playwright/test').Page, name: string) {
@@ -44,9 +44,10 @@ test('rankings, profile and committed score changes are public', async ({ authen
     await page.setViewportSize({ width: 1280, height: 900 });
 
     await query(
-      `INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, games_played, display_score)
-       VALUES ($1, $2, 10, 15)`, [board.leaderboard_id, snake.battlesnake_id],
+      `INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id, games_played, display_score)
+       VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2, 10, 15)`, [board.leaderboard_id, snake.battlesnake_id],
     );
+    await registerFixtureEntries();
     await page.goto(profile);
     const oldRating = await page.locator('.profile-rating strong').innerText();
     await expect(page.locator('.profile-rating')).toContainText('1 leaderboard');
@@ -108,9 +109,9 @@ test('rankings pages past fifty rows', async ({ page }) => {
   try {
     await query(
       `WITH inserted_users AS (
-         INSERT INTO users (external_github_id, github_login, github_access_token, display_name)
+         INSERT INTO users (external_github_id, github_login, display_name)
          SELECT 800000000000000 + $1::bigint * 100 + n,
-                CASE WHEN n = 1 THEN $4 ELSE $2 || '_' || n END, 'test',
+                CASE WHEN n = 1 THEN $4 ELSE $2 || '_' || n END,
                 CASE WHEN n = 2 THEN $5 ELSE NULL END
          FROM generate_series(1, 55) n RETURNING user_id, github_login
        ), inserted_snakes AS (
@@ -118,10 +119,12 @@ test('rankings pages past fifty rows', async ({ page }) => {
          SELECT user_id, github_login, 'https://example.com' FROM inserted_users
          RETURNING battlesnake_id
        )
-       INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, games_played, display_score)
-       SELECT $3, battlesnake_id, 10, 100 FROM inserted_snakes`,
+       INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id, games_played, display_score)
+       SELECT $3, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $3), battlesnake_id, 10, 100
+       FROM inserted_snakes`,
       [Date.now(), prefix, board.leaderboard_id, longLogin, longDisplayName],
     );
+    await registerFixtureEntries();
     await page.goto('/rankings');
     await capture(page, 'rankings-desktop');
     await page.setViewportSize({ width: 375, height: 812 });
@@ -165,8 +168,8 @@ test('rankings pages past fifty rows', async ({ page }) => {
 test('rankings player cell shows the owner country flag', async ({ page }) => {
   const stamp = `${Date.now()}_${Math.floor(Math.random() * 10000)}`;
   const [owner] = await query<{ user_id: string }>(
-    `INSERT INTO users (external_github_id, github_login, github_access_token, display_name, country)
-     VALUES ($1::bigint, $2, 'tk', 'Ranking Flag GB', 'GB') RETURNING user_id`,
+    `INSERT INTO users (external_github_id, github_login, display_name, country)
+     VALUES ($1::bigint, $2, 'Ranking Flag GB', 'GB') RETURNING user_id`,
     [Date.now() * 1000 + 700_200, `ranking-flag-gb-${stamp}`],
   );
   try {
@@ -179,10 +182,11 @@ test('rankings player cell shows the owner country flag', async ({ page }) => {
       [owner.user_id, `Ranking Flag Snake ${stamp}`],
     );
     await query(
-      `INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, games_played, display_score)
-       VALUES ($1, $2, 10, 15)`,
+      `INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id, games_played, display_score)
+       VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2, 10, 15)`,
       [board.leaderboard_id, snake.battlesnake_id],
     );
+    await registerFixtureEntries();
 
     const row = await findRankingRow(page, `/users/ranking-flag-gb-${stamp}/${owner.user_id}`);
     await expect(row.getByRole('link', { name: 'Ranking Flag GB' })).toBeVisible();

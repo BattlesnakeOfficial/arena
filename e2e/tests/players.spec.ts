@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test';
 import { test, expect } from '../fixtures/test';
-import { query } from '../fixtures/db';
+import { query, registerFixtureEntries } from '../fixtures/db';
 
 /**
  * The player directory is paginated at 50 rows/page over a database shared
@@ -111,8 +111,8 @@ async function insertUser(
   displayName: string | null,
 ): Promise<string> {
   const rows = await query<{ user_id: string }>(
-    `INSERT INTO users (external_github_id, github_login, github_access_token, display_name)
-     VALUES ($1, $2, 'test-token', $3)
+    `INSERT INTO users (external_github_id, github_login, display_name)
+     VALUES ($1, $2, $3)
      RETURNING user_id`,
     [externalId, login, displayName],
   );
@@ -129,12 +129,13 @@ async function giveActiveSnake(userId: string, name: string, disabled = false): 
   );
 
   await query(
-    `INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, disabled_at)
-     SELECT leaderboard_id, $1, $2
+    `INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id, disabled_at)
+     SELECT leaderboard_id, (SELECT season_id FROM leaderboard_seasons s WHERE s.leaderboard_id = leaderboards.leaderboard_id), $1, $2
      FROM leaderboards
      WHERE name = 'Standard 11x11'`,
     [rows[0].battlesnake_id, disabled ? new Date() : null],
   );
+  await registerFixtureEntries();
 }
 
 test.describe.serial('Player Directory', () => {
@@ -170,10 +171,9 @@ test.describe.serial('Player Directory', () => {
 
       // 51 active players — one more than a page — to exercise the pager.
       await query(
-        `INSERT INTO users (external_github_id, github_login, github_access_token, display_name)
+        `INSERT INTO users (external_github_id, github_login, display_name)
          SELECT $1::bigint + i,
                 $2 || '-page-' || to_char(i, 'FM000'),
-                'test-token',
                 $2 || '-page-' || to_char(i, 'FM000')
          FROM generate_series(0, 50) AS i`,
         [idBase + 100, prefix],
@@ -186,14 +186,15 @@ test.describe.serial('Player Directory', () => {
         [`${prefix}-page-%`],
       );
       await query(
-        `INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-         SELECT l.leaderboard_id, b.battlesnake_id
+        `INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+         SELECT l.leaderboard_id, (SELECT season_id FROM leaderboard_seasons s WHERE s.leaderboard_id = l.leaderboard_id), b.battlesnake_id
          FROM battlesnakes b
          JOIN users u ON u.user_id = b.user_id
          CROSS JOIN leaderboards l
          WHERE l.name = 'Standard 11x11' AND u.github_login LIKE $1`,
         [`${prefix}-page-%`],
       );
+      await registerFixtureEntries();
 
       const pagedLabels = Array.from({ length: 51 }, (_, i) =>
         `${prefix}-page-${String(i).padStart(3, '0')}`,

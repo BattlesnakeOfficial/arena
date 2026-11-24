@@ -457,12 +457,15 @@ fn opponent_list(opponents: &[String]) -> String {
 }
 
 fn emit_page_view(achievement: Achievement, owner_id: Uuid, referrer: &str) {
-    tracing::info!(
-        event_type = "share_page_view",
-        slug = achievement.slug(),
-        owner_id = %owner_id,
-        referrer,
-        "Achievement share page viewed"
+    cja::product_event!(
+        name: "share_page_view",
+        user_id: None,
+        message: "Achievement share page viewed",
+        properties: {
+            slug = achievement.slug(),
+            owner_id = %owner_id,
+            referrer = referrer,
+        }
     );
 }
 
@@ -484,12 +487,15 @@ pub async fn share_action(
     if !matches!(form.channel.as_str(), "native" | "copy" | "download") {
         return Ok(StatusCode::BAD_REQUEST);
     }
-    tracing::info!(
-        event_type = "share_action",
-        slug = achievement.slug(),
-        owner_id = %user_id,
-        channel = %form.channel,
-        "Achievement share action"
+    cja::product_event!(
+        name: "share_action",
+        user_id: None,
+        message: "Achievement share action",
+        properties: {
+            slug = achievement.slug(),
+            owner_id = %user_id,
+            channel = %form.channel,
+        }
     );
     Ok(StatusCode::NO_CONTENT)
 }
@@ -510,12 +516,15 @@ pub async fn share_cta_click(
     if !matches!(form.cta.as_str(), "achievements" | "get_started") {
         return Ok(StatusCode::BAD_REQUEST);
     }
-    tracing::info!(
-        event_type = "share_cta_click",
-        slug = achievement.slug(),
-        owner_id = %user_id,
-        cta = %form.cta,
-        "Achievement share CTA click"
+    cja::product_event!(
+        name: "share_cta_click",
+        user_id: None,
+        message: "Achievement share CTA click",
+        properties: {
+            slug = achievement.slug(),
+            owner_id = %user_id,
+            cta = %form.cta,
+        }
     );
     Ok(StatusCode::NO_CONTENT)
 }
@@ -647,7 +656,7 @@ mod tests {
 
     async fn user(pool: &PgPool, github_id: i64) -> Uuid {
         sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES ($1, $2, '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login) VALUES ($1, $2) RETURNING user_id",
         )
         .bind(github_id)
         .bind(format!("share-{github_id}"))
@@ -891,6 +900,11 @@ mod tests {
         assert_eq!(views.len(), 1, "one anonymous visitor view");
         assert_eq!(views[0].get("slug").map(String::as_str), Some("first_win"));
         assert_eq!(views[0].get("referrer").map(String::as_str), Some("direct"));
+        assert_eq!(
+            views[0].get("owner_id").map(String::as_str),
+            Some(owner.to_string().as_str())
+        );
+        assert!(!views[0].contains_key("user_id"));
     }
 
     #[sqlx::test(migrations = "../migrations")]
@@ -967,6 +981,7 @@ mod tests {
         let entry = crate::models::leaderboard::get_or_create_entry(&pool, private_lb, rival_snake)
             .await
             .unwrap()
+            .expect("live snake joins")
             .leaderboard_entry_id;
         participant(&pool, game_id, owner_snake, 1, None).await;
         participant(&pool, game_id, rival_snake, 2, Some(entry)).await;
@@ -1373,7 +1388,11 @@ mod tests {
                     .any(|fields| fields.get("channel").map(String::as_str) == Some(channel)),
                 "{channel} recorded"
             );
+            assert!(actions.iter().all(|fields| !fields.contains_key("user_id")));
         }
+        let action_count = crate::test_capture::Capture::shared()
+            .events_with_field("share_action", "owner_id", &owner.to_string())
+            .len();
         let reply = request(
             &state,
             "POST",
@@ -1383,6 +1402,13 @@ mod tests {
         )
         .await;
         assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            crate::test_capture::Capture::shared()
+                .events_with_field("share_action", "owner_id", &owner.to_string())
+                .len(),
+            action_count,
+            "rejected channel must not emit a share action"
+        );
         // Unknown earn, malformed id, and GET all fail.
         let stranger = user(&pool, 2120802).await;
         let reply = request(
@@ -1427,7 +1453,11 @@ mod tests {
                     .any(|fields| fields.get("cta").map(String::as_str) == Some(cta)),
                 "{cta} recorded"
             );
+            assert!(clicks.iter().all(|fields| !fields.contains_key("user_id")));
         }
+        let cta_count = crate::test_capture::Capture::shared()
+            .events_with_field("share_cta_click", "owner_id", &owner.to_string())
+            .len();
         let reply = request(
             &state,
             "POST",
@@ -1437,6 +1467,13 @@ mod tests {
         )
         .await;
         assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            crate::test_capture::Capture::shared()
+                .events_with_field("share_cta_click", "owner_id", &owner.to_string())
+                .len(),
+            cta_count,
+            "rejected CTA must not emit a click"
+        );
         let reply = get(&state, &format!("{base}/cta-click"), &[]).await;
         assert_eq!(reply.status, StatusCode::METHOD_NOT_ALLOWED);
     }

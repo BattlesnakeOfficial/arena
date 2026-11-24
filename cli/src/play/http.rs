@@ -18,8 +18,8 @@ use color_eyre::eyre::{Result, eyre};
 use rules::Direction;
 
 use engine_core::move_response::{
-    BODY_READ_CAP_BYTES, MoveResponse, MoveResult, interpret_move_response, parse_failure_result,
-    transport_fallback_result,
+    BODY_READ_CAP_BYTES, MoveOutcome, MoveResponse, MoveResult, interpret_move_response,
+    parse_failure_result, transport_fallback_result,
 };
 
 /// `GET /` as the CLI reads it: arena's shared metadata plus the
@@ -34,10 +34,9 @@ pub struct PingInfo {
 }
 
 /// Thin async client for one snake server. `timeout` bounds the ENTIRE
-/// round trip — send and body read — unlike the server's `request_move`
-/// (which wraps only `.send()`); a snake that answers headers and then
-/// stalls wedges a local game forever under a send-only bound, where Go's
-/// `http.Client{Timeout}` would fire.
+/// round trip — send and body read — matching the server's `request_move`;
+/// a snake that answers headers and then stalls is a real timeout, like
+/// Go's `http.Client{Timeout}` would produce.
 ///
 /// Request bodies arrive pre-serialized (`&str`): the client has no
 /// `Result` return to propagate a serialization failure through, so the
@@ -129,7 +128,7 @@ impl SnakeHttpClient {
     /// Returns the `MoveResult` plus, when the round trip failed in any way
     /// Go would WARN about, Go's warning text (URL, status, body, real
     /// error — `play.go` `getSnakeUpdate`) for the caller to log. The log
-    /// text must NOT be derived from `MoveResult::timed_out`, which is
+    /// text must NOT be derived from `MoveOutcome::timed_out()`, which is
     /// true for every transport failure (server parity) and would call a
     /// refused connection a timeout.
     pub async fn request_move(
@@ -155,7 +154,7 @@ impl SnakeHttpClient {
 
         match outcome {
             RoundTrip::TimedOut => (
-                transport_fallback_result(snake_id, last_direction, None, true),
+                transport_fallback_result(snake_id, last_direction, None, MoveOutcome::TimedOut),
                 Some(format!(
                     "Request to {move_url} failed\n\tError: request timed out (after {} ms)",
                     self.timeout.as_millis()
@@ -164,30 +163,25 @@ impl SnakeHttpClient {
             RoundTrip::Transport(err) => (
                 // Same as the server: a send-phase network error is a
                 // transport fallback, timed_out = true.
-                transport_fallback_result(snake_id, last_direction, None, true),
+                transport_fallback_result(snake_id, last_direction, None, MoveOutcome::Transport),
                 Some(format!("Request to {move_url} failed\n\tError: {err}")),
             ),
             RoundTrip::Body(status, Err(err)) => (
-                parse_failure_result(snake_id, last_direction, Some(elapsed), Some(status)),
+                parse_failure_result(snake_id, last_direction, Some(elapsed), status),
                 Some(format!(
                     "Failed to read response body from {move_url}\n\tError: {err}"
                 )),
             ),
             RoundTrip::Body(status, Ok(body)) => {
-                let interpreted = interpret_move_response(
-                    snake_id,
-                    &body,
-                    Some(status),
-                    Some(elapsed),
-                    last_direction,
-                );
+                let interpreted =
+                    interpret_move_response(snake_id, &body, status, Some(elapsed), last_direction);
                 // Go checks the status before decoding (play.go
                 // getSnakeUpdate): every status other than exactly 200 —
                 // including other 2xx like 201 — warns with the body it
                 // got, whatever the body is.
                 if status != 200 {
                     let result = interpreted.unwrap_or_else(|_| {
-                        parse_failure_result(snake_id, last_direction, Some(elapsed), Some(status))
+                        parse_failure_result(snake_id, last_direction, Some(elapsed), status)
                     });
                     (
                         result,
@@ -199,7 +193,7 @@ impl SnakeHttpClient {
                     )
                 } else {
                     match interpreted {
-                        Ok(result) if !result.errored => (result, None),
+                        Ok(result) if !result.outcome.errored() => (result, None),
                         // 2xx but the direction was unrecognized.
                         Ok(result) => {
                             let raw_move = serde_json::from_str::<MoveResponse>(&body)
@@ -218,12 +212,7 @@ impl SnakeHttpClient {
                         }
                         // 2xx but the body is not a move response.
                         Err(json_err) => (
-                            parse_failure_result(
-                                snake_id,
-                                last_direction,
-                                Some(elapsed),
-                                Some(status),
-                            ),
+                            parse_failure_result(snake_id, last_direction, Some(elapsed), status),
                             Some(format!(
                                 "Failed to decode JSON from {move_url}\n\
                                  \tError: {json_err}\n\
@@ -371,9 +360,7 @@ mod tests {
             Direction::Right,
             "the move is used, like arena"
         );
-        assert!(result.errored, "non-2xx is still an error");
-        assert!(!result.timed_out);
-        assert_eq!(result.status_code, Some(500));
+        assert_eq!(result.outcome, MoveOutcome::HttpError { status_code: 500 });
         let warning = warning.expect("non-200 carries Go's warning");
         assert!(
             warning.starts_with(&format!(
@@ -433,9 +420,9 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
 
         assert_eq!(result.direction, Direction::Left);
-        assert!(result.timed_out);
-        assert!(!result.errored);
-        assert_eq!(result.status_code, None);
+        assert!(result.outcome.timed_out());
+        assert!(!result.outcome.errored());
+        assert_eq!(result.outcome.status_code(), None);
         let warning = warning.expect("a timeout carries Go's warning");
         assert!(
             warning.starts_with(&format!("Request to {}/move failed", server.uri())),
@@ -458,9 +445,7 @@ mod tests {
             .await;
 
         assert_eq!(result.direction, Direction::Down, "fallback to last move");
-        assert!(result.errored);
-        assert!(!result.timed_out);
-        assert_eq!(result.status_code, Some(200));
+        assert_eq!(result.outcome, MoveOutcome::Invalid { status_code: 200 });
         let warning = warning.expect("a parse failure carries Go's warning");
         assert!(
             warning.starts_with(&format!("Failed to decode JSON from {}/move", server.uri())),
@@ -496,8 +481,8 @@ mod tests {
         let (result, warning) = client(2000)
             .request_move(&url, &body_for_move(), "s1", Some(Direction::Up))
             .await;
-        assert!(result.timed_out);
-        assert!(!result.errored);
+        assert!(result.outcome.timed_out());
+        assert!(!result.outcome.errored());
         assert_eq!(result.direction, Direction::Up);
         // The warning names the URL and the real error — a dead connection
         // is NOT reported as a timeout.
@@ -650,7 +635,7 @@ mod tests {
         .await
         .expect("stalled body does not hang (10x margin over the 100ms budget)");
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
-        assert!(result.timed_out);
+        assert!(result.outcome.timed_out());
         assert_eq!(result.direction, Direction::Up);
         let _ = server_thread.join();
     }

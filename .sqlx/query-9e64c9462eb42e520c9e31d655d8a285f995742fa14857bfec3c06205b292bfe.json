@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT leaderboard_entry_id, season_id FROM leaderboard_entries WHERE leaderboard_entry_id = ANY($1) FOR SHARE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_entries",
+            "name": "leaderboard_entry_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "season_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_entries",
+            "name": "season_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "9e64c9462eb42e520c9e31d655d8a285f995742fa14857bfec3c06205b292bfe"
+}

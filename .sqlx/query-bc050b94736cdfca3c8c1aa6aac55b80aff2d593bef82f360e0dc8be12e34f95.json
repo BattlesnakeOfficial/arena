@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT DISTINCT payload->>'engine_game_id' AS \"id!\" FROM jobs\n            WHERE name = 'BackupSingleGameJob'\n              AND payload->>'engine_game_id' = ANY($1)\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "bc050b94736cdfca3c8c1aa6aac55b80aff2d593bef82f360e0dc8be12e34f95"
+}

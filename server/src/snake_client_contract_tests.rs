@@ -348,7 +348,8 @@ fn create_test_engine_game_with_snakes(snake_ids: Vec<&str>) -> crate::engine::E
         },
         meta: GameMeta {
             game_id: "contract-game".to_string(),
-            ruleset_name: "standard".to_string(),
+            mode: engine_core::GameMode::Standard,
+            game_over_rule: engine_core::GameMode::Standard.default_game_over_rule(),
             timeout: 500,
             settings: StandardSettings::default(),
             royale: None,
@@ -397,13 +398,13 @@ async fn proxied_request_reaches_mock_snake() {
     let result = move_via_proxy(&clients, &endpoint, Duration::from_millis(1000), None).await;
 
     assert_eq!(result.direction, Direction::Left);
-    assert!(!result.timed_out);
-    assert!(!result.errored);
+    assert!(!result.outcome.timed_out());
+    assert!(!result.outcome.errored());
     assert!(
         result.latency_ms.is_some(),
         "proxy-measured latency: {result:?}"
     );
-    assert_eq!(result.status_code, Some(200));
+    assert_eq!(result.outcome.status_code(), Some(200));
     snake.verify().await;
     let _ = proxy; // keep the &'static alive across the await points
 }
@@ -442,10 +443,13 @@ async fn timeout_header_parsed_and_defaulted() {
     )
     .await;
     assert_eq!(result.direction, Direction::Down, "fallback move");
-    assert!(result.timed_out, "504 maps to timed_out: {result:?}");
-    assert!(!result.errored);
+    assert!(
+        result.outcome.timed_out(),
+        "504 maps to timed_out: {result:?}"
+    );
+    assert!(!result.outcome.errored());
     assert_eq!(result.latency_ms, None);
-    assert_eq!(result.status_code, None);
+    assert_eq!(result.outcome.status_code(), None);
     // DEV-1946 hardening: a proxy 504 carries X-Battlesnake-Server-Error, so
     // arena classifies it as a *snake-side* timeout — exactly one hit on the
     // snake, no direct retry (a retry would double the hits and burn the
@@ -477,8 +481,8 @@ async fn bad_or_missing_auth_returns_407() {
     let result = move_via_proxy(&clients, &endpoint, Duration::from_millis(500), None).await;
 
     assert_eq!(result.direction, Direction::Right, "move via direct retry");
-    assert!(!result.timed_out);
-    assert!(!result.errored);
+    assert!(!result.outcome.timed_out());
+    assert!(!result.outcome.errored());
     assert!(result.latency_ms.is_some(), "direct retry is measured");
     snake.verify().await;
 }
@@ -531,10 +535,16 @@ async fn snake_statuses_pass_through() {
         let endpoint = endpoint_for(snake.uri());
         let result = move_via_proxy(&clients, &endpoint, Duration::from_millis(1000), None).await;
         assert_eq!(result.direction, Direction::Down, "move still used");
-        assert!(!result.timed_out, "snake status is not a proxy timeout");
-        assert!(result.errored, "non-2xx is the snake erroring: {result:?}");
+        assert!(
+            !result.outcome.timed_out(),
+            "snake status is not a proxy timeout"
+        );
+        assert!(
+            result.outcome.errored(),
+            "non-2xx is the snake erroring: {result:?}"
+        );
         assert!(result.latency_ms.is_some());
-        assert_eq!(result.status_code, Some(status));
+        assert_eq!(result.outcome.status_code(), Some(status));
     }
 }
 
@@ -634,10 +644,10 @@ async fn snake_stalls_before_headers_times_out() {
 
     assert_eq!(result.direction, Direction::Left, "fallback move");
     assert!(
-        result.timed_out,
+        result.outcome.timed_out(),
         "pre-headers stall is a timeout: {result:?}"
     );
-    assert!(!result.errored);
+    assert!(!result.outcome.errored());
     assert_eq!(result.latency_ms, None);
     assert!(
         started.elapsed() < Duration::from_millis(300 + 300),
@@ -663,7 +673,7 @@ async fn unreachable_snake_returns_502_dns() {
     };
     let endpoint = endpoint_for("http://snake.invalid".to_string());
     let result = move_via_proxy(&clients, &endpoint, Duration::from_millis(1000), None).await;
-    assert!(result.timed_out, "transport failure: {result:?}");
+    assert!(result.outcome.timed_out(), "transport failure: {result:?}");
     assert_eq!(result.latency_ms, None);
 
     // raw probe asserts the header itself
@@ -690,7 +700,7 @@ async fn refused_port_returns_502_connect() {
     };
     let endpoint = endpoint_for(format!("http://127.0.0.1:{port}"));
     let result = move_via_proxy(&clients, &endpoint, Duration::from_millis(1000), None).await;
-    assert!(result.timed_out, "transport failure: {result:?}");
+    assert!(result.outcome.timed_out(), "transport failure: {result:?}");
 
     let res = raw_proxy_request(&format!("http://127.0.0.1:{port}/move"), "1000", true)
         .send()
@@ -746,8 +756,8 @@ async fn tls_handshake_fail_returns_502_tls() {
     };
     let endpoint = endpoint_for(format!("https://{addr}"));
     let result = move_via_proxy(&clients, &endpoint, Duration::from_millis(1000), None).await;
-    assert!(result.timed_out, "transport failure: {result:?}");
-    assert!(!result.errored);
+    assert!(result.outcome.timed_out(), "transport failure: {result:?}");
+    assert!(!result.outcome.errored());
     assert_eq!(result.latency_ms, None);
 
     // DEV-1946 hardening: the 502 + error header is snake-side, so arena
@@ -977,20 +987,20 @@ async fn oversized_response_body_declared_502() {
     let go = matches!(proxy().await, ProxyUnderTest::Docker { .. });
     if go {
         assert!(
-            !result.timed_out,
+            !result.outcome.timed_out(),
             "Go streams the declared body; truncated 200 is not a timeout: {result:?}"
         );
         assert!(
-            result.errored,
+            result.outcome.errored(),
             "truncated body is a parse failure: {result:?}"
         );
         return;
     }
     assert!(
-        result.timed_out,
+        result.outcome.timed_out(),
         "502+5: is a transport failure: {result:?}"
     );
-    assert!(!result.errored);
+    assert!(!result.outcome.errored());
     assert_eq!(result.latency_ms, None);
 }
 
@@ -1022,8 +1032,11 @@ async fn oversized_response_body_falls_back() {
     )
     .await;
     assert_eq!(result.direction, Direction::Left, "fallback move");
-    assert!(!result.timed_out);
-    assert!(result.errored, "unparseable body is the snake erroring");
+    assert!(!result.outcome.timed_out());
+    assert!(
+        result.outcome.errored(),
+        "unparseable body is the snake erroring"
+    );
     assert!(result.latency_ms.is_some());
 }
 
@@ -1080,15 +1093,22 @@ async fn stalled_body_aborts_as_transport_fault() {
         "the direct retry's real move is used, not the fallback: {result:?}"
     );
     assert!(
-        !result.timed_out,
+        !result.outcome.timed_out(),
         "no 504 can follow forwarded headers: {result:?}"
     );
-    assert!(!result.errored, "a proxy fault is never the snake's error");
+    assert!(
+        !result.outcome.errored(),
+        "a proxy fault is never the snake's error"
+    );
     assert!(
         result.latency_ms.is_some(),
         "the direct retry's move is measured: {result:?}"
     );
-    assert_eq!(result.status_code, Some(200), "the direct answer's status");
+    assert_eq!(
+        result.outcome.status_code(),
+        Some(200),
+        "the direct answer's status"
+    );
     assert!(
         started.elapsed() < Duration::from_millis(proxy_budget_ms + direct_timeout_ms + 400),
         "proxy abort + direct retry fit inside both budgets + slack: {:?}",

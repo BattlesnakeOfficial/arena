@@ -16,16 +16,17 @@ use crate::{
         avatar::user_avatar,
         live_refresh::{LiveRefreshConfig, live_page_refresh},
         page_factory::PageFactory,
+        snake_avatar::snake_avatar,
         snake_tags::snake_tag_chips,
     },
     cron::MATCHMAKER_INTERVAL_SECS,
-    customizations::chip_color,
     errors::{ServerResult, WithRedirect},
-    models::leaderboard_entry_health,
+    models::leaderboard_registration,
     models::{
         battlesnake::{self, Visibility},
         game::GameType,
         leaderboard::{self, MIN_GAMES_FOR_RANKING},
+        leaderboard_season::{self, SeasonLookup, SeasonPhase},
         private_leaderboard, tag, user,
     },
     routes::auth::{CurrentUser, OptionalUser},
@@ -40,6 +41,10 @@ pub struct PaginationParams {
     pub page: Option<i64>,
     #[serde(default)]
     pub sort: leaderboard::LeaderboardSort,
+    /// `?season=<season_id>`: show that season (must belong to the league).
+    /// Absent = the league's default season (see `select_season`).
+    #[serde(default)]
+    pub season: Option<Uuid>,
 }
 
 /// GET /leaderboards — list all leaderboards
@@ -140,42 +145,99 @@ pub async fn show_leaderboard(
         leaderboard::LeaderboardSort::Rating
     };
 
+    let SeasonLookup::Found(selection) =
+        leaderboard_season::select_season(&state.db, leaderboard_id, pagination.season)
+            .await
+            .wrap_err("Failed to select leaderboard season")?
+    else {
+        return Ok(crate::routes::render_not_found(page_factory));
+    };
+    let selected = selection.selected.clone();
+    let league_active = selection.league_active().cloned();
+    let next_season_starts_at = selection.next_season_starts_at;
+    // Sort and pager links stay sticky to an explicit ?season= only, so the
+    // canonical (default-season) URLs are unchanged.
+    let season_param = pagination
+        .season
+        .map(|id| format!("&season={id}"))
+        .unwrap_or_default();
+
     let per_page: i64 = 50;
 
-    let total_ranked = leaderboard::count_ranked_entries(&state.db, leaderboard_id)
-        .await
-        .wrap_err("Failed to count ranked entries")?;
+    let (total_ranked, page, ranked, placement, status, activity, top_eaters) = if let Some(info) =
+        &selected
+    {
+        let season_id = info.season.season_id;
+        let total_ranked = leaderboard::count_ranked_entries(&state.db, leaderboard_id, season_id)
+            .await
+            .wrap_err("Failed to count ranked entries")?;
 
+        let total_pages = if total_ranked > 0 {
+            (total_ranked + per_page - 1) / per_page
+        } else {
+            1
+        };
+        let page = pagination.page.unwrap_or(0).clamp(0, total_pages - 1);
+
+        let ranked = leaderboard::get_ranked_entries_paginated(
+            &state.db,
+            leaderboard_id,
+            season_id,
+            page,
+            per_page,
+            sort,
+        )
+        .await
+        .wrap_err("Failed to fetch ranked entries")?;
+
+        let placement = leaderboard::get_placement_entries(&state.db, leaderboard_id, season_id)
+            .await
+            .wrap_err("Failed to fetch placement entries")?;
+
+        let status = leaderboard::get_leaderboard_status(&state.db, leaderboard_id, season_id)
+            .await
+            .wrap_err("Failed to fetch leaderboard status")?;
+
+        let activity = leaderboard::get_activity_feed(&state.db, leaderboard_id, season_id, 8)
+            .await
+            .wrap_err("Failed to fetch activity feed")?;
+
+        let top_eaters = if has_food {
+            leaderboard::get_top_eaters(&state.db, leaderboard_id, season_id, 3)
+                .await
+                .wrap_err("Failed to fetch top eaters")?
+        } else {
+            vec![]
+        };
+        (
+            total_ranked,
+            page,
+            ranked,
+            placement,
+            status,
+            activity,
+            top_eaters,
+        )
+    } else {
+        // Only future seasons: the empty-league shape.
+        (
+            0,
+            0,
+            vec![],
+            vec![],
+            leaderboard::LeaderboardStatus {
+                last_game_created_at: None,
+                games_in_progress: 0,
+                total_games: 0,
+            },
+            vec![],
+            vec![],
+        )
+    };
     let total_pages = if total_ranked > 0 {
         (total_ranked + per_page - 1) / per_page
     } else {
         1
-    };
-    let page = pagination.page.unwrap_or(0).clamp(0, total_pages - 1);
-
-    let ranked =
-        leaderboard::get_ranked_entries_paginated(&state.db, leaderboard_id, page, per_page, sort)
-            .await
-            .wrap_err("Failed to fetch ranked entries")?;
-
-    let placement = leaderboard::get_placement_entries(&state.db, leaderboard_id)
-        .await
-        .wrap_err("Failed to fetch placement entries")?;
-
-    let status = leaderboard::get_leaderboard_status(&state.db, leaderboard_id)
-        .await
-        .wrap_err("Failed to fetch leaderboard status")?;
-
-    let activity = leaderboard::get_activity_feed(&state.db, leaderboard_id, 8)
-        .await
-        .wrap_err("Failed to fetch activity feed")?;
-
-    let top_eaters = if has_food {
-        leaderboard::get_top_eaters(&state.db, leaderboard_id, 3)
-            .await
-            .wrap_err("Failed to fetch top eaters")?
-    } else {
-        vec![]
     };
 
     // Get user's snakes for the join form
@@ -187,11 +249,11 @@ pub async fn show_leaderboard(
         vec![]
     };
 
-    // Get user's entries in this leaderboard
+    // The user's snakes registered in this league
     let user_entries = if let Some(ref u) = user {
-        leaderboard::get_user_entries(&state.db, leaderboard_id, u.user_id)
+        leaderboard::get_user_memberships(&state.db, leaderboard_id, u.user_id)
             .await
-            .wrap_err("Failed to fetch user's leaderboard entries")?
+            .wrap_err("Failed to fetch user's league memberships")?
     } else {
         vec![]
     };
@@ -206,16 +268,34 @@ pub async fn show_leaderboard(
         _ => false,
     };
 
-    // Compute next matchmaker run time. When the ladder is starved the
-    // matchmaker no-ops, so "last game + interval" would show an ever-staler
-    // past timestamp — say why matchmaking is paused instead.
+    // Compute next matchmaker run time — a league-live fact, keyed to the
+    // league's active season, never to the selected (maybe past) one. When
+    // the ladder is starved the matchmaker no-ops, so "last game + interval"
+    // would show an ever-staler past timestamp — say why matchmaking is
+    // paused instead.
     let enabled_count = leaderboard::count_active_entries(&state.db, leaderboard_id)
         .await
         .wrap_err("Failed to count active entries")?;
+    let active_last_game_created_at = match &league_active {
+        None => None,
+        Some(active)
+            if selected
+                .as_ref()
+                .is_some_and(|info| info.season.season_id == active.season.season_id) =>
+        {
+            status.last_game_created_at
+        }
+        Some(active) => {
+            leaderboard::get_leaderboard_status(&state.db, leaderboard_id, active.season.season_id)
+                .await
+                .wrap_err("Failed to fetch active season status")?
+                .last_game_created_at
+        }
+    };
     let next_run_str = if enabled_count < leaderboard::MIN_MATCH_SIZE as i64 {
         None
     } else {
-        status.last_game_created_at.map(|last| {
+        active_last_game_created_at.map(|last| {
             let next_run = last + chrono::Duration::seconds(MATCHMAKER_INTERVAL_SECS as i64);
             HumanTime::from(next_run).to_string()
         })
@@ -303,6 +383,9 @@ pub async fn show_leaderboard(
                 }
             }
 
+            (season_picker(leaderboard_id, &selection.seasons, selected.as_ref().map(|info| info.season.season_id)))
+            (season_notice(leaderboard_id, selected.as_ref(), league_active.as_ref(), next_season_starts_at))
+
             div class="stats" {
                 div class="stat" {
                     div class="label" { "Ranked snakes" }
@@ -322,7 +405,14 @@ pub async fn show_leaderboard(
                 div class="stat" {
                     div class="label" { "Next matchmaker run" }
                     div class="value sm" {
-                        @if enabled_count < leaderboard::MIN_MATCH_SIZE as i64 {
+                        @if league_active.is_none() {
+                            // Never "paused" here either (see below).
+                            @if let Some(next) = next_season_starts_at {
+                                "between seasons — next starts " (HumanTime::from(next).to_string())
+                            } @else {
+                                "between seasons"
+                            }
+                        } @else if enabled_count < leaderboard::MIN_MATCH_SIZE as i64 {
                             // "waiting", not "paused": entry status badges say
                             // "Paused" and e2e locators match text loosely.
                             "waiting for at least "
@@ -363,12 +453,12 @@ pub async fn show_leaderboard(
                             @if sort == leaderboard::LeaderboardSort::Rating {
                                 span class="on" aria-current="true" { "Rating" }
                             } @else {
-                                a href={"/leaderboards/"(leaderboard_id)"?sort=rating"} { "Rating" }
+                                a href={"/leaderboards/"(leaderboard_id)"?sort=rating"(season_param)} { "Rating" }
                             }
                             @if sort == leaderboard::LeaderboardSort::FoodEaten {
                                 span class="on" aria-current="true" { "Food eaten" }
                             } @else {
-                                a href={"/leaderboards/"(leaderboard_id)"?sort=food_eaten"} { "Food eaten" }
+                                a href={"/leaderboards/"(leaderboard_id)"?sort=food_eaten"(season_param)} { "Food eaten" }
                             }
                         }
                     }
@@ -394,23 +484,29 @@ pub async fn show_leaderboard(
                                 tbody {
                                     @for (i, entry) in ranked.iter().enumerate() {
                                         @let rank = rank_start + i as i64 + 1;
-                                        @let is_you = user.as_ref().is_some_and(|u| u.user_id == entry.user_id);
+                                        // Tombstone rows are not "yours": no row highlight,
+                                        // no "— you" (the user id is not nulled).
+                                        @let is_you = !entry.deleted && user.as_ref().is_some_and(|u| u.user_id == entry.user_id);
                                         tr .top[rank <= 3] .you[is_you] {
                                             td class="rank" { (format!("{rank:02}")) }
                                             td {
                                                 div class="snake-cell" {
-                                                    span class="chip" style={"background:"(chip_color(&entry.snake_color))} {}
+                                                    (snake_avatar(entry.snake_head.as_deref().unwrap_or(""), entry.snake_tail.as_deref().unwrap_or(""), entry.snake_color.as_deref().unwrap_or("")))
                                                     div class="snake-details" {
-                                                        a class="name" href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
-                                                            (entry.snake_name)
+                                                        @if entry.deleted {
+                                                            span class="name" { "Deleted snake" }
+                                                        } @else {
+                                                            a class="name" href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
+                                                                (entry.snake_name.as_deref().unwrap_or_default())
+                                                            }
+                                                            span class="owner" {
+                                                                "by "
+                                                                (crate::components::flag::country_flag(entry.owner_country.as_deref().unwrap_or("")))
+                                                                a href={"/users/"(entry.owner_login.as_deref().unwrap_or_default())} { (entry.owner_name.as_deref().unwrap_or_default()) }
+                                                                @if is_you { " — you" }
+                                                            }
+                                                            (snake_tag_chips(snake_tags.get(&entry.battlesnake_id).map(Vec::as_slice).unwrap_or(&[])))
                                                         }
-                                                        span class="owner" {
-                                                            "by "
-                                                            (crate::components::flag::country_flag(&entry.owner_country))
-                                                            a href={"/users/"(entry.owner_login)} { (entry.owner_name) }
-                                                            @if is_you { " — you" }
-                                                        }
-                                                        (snake_tag_chips(snake_tags.get(&entry.battlesnake_id).map(Vec::as_slice).unwrap_or(&[])))
                                                     }
                                                 }
                                             }
@@ -432,13 +528,13 @@ pub async fn show_leaderboard(
 
                         div class="pager" {
                             @if page > 0 {
-                                a href={"/leaderboards/"(leaderboard_id)"?sort="(sort_param)"&page="(page - 1)} { "‹ Prev" }
+                                a href={"/leaderboards/"(leaderboard_id)"?sort="(sort_param)"&page="(page - 1)(season_param)} { "‹ Prev" }
                             }
                             @if total_pages > 1 {
                                 span class="cur" { "Page " (page + 1) " of " (total_pages) }
                             }
                             @if page < total_pages - 1 {
-                                a href={"/leaderboards/"(leaderboard_id)"?sort="(sort_param)"&page="(page + 1)} { "Next ›" }
+                                a href={"/leaderboards/"(leaderboard_id)"?sort="(sort_param)"&page="(page + 1)(season_param)} { "Next ›" }
                             }
                             span class="spacer" {}
                             span {
@@ -465,17 +561,21 @@ pub async fn show_leaderboard(
                                         tr {
                                             td {
                                                 div class="snake-cell" {
-                                                    span class="chip" style={"background:"(chip_color(&entry.snake_color))} {}
+                                                    (snake_avatar(entry.snake_head.as_deref().unwrap_or(""), entry.snake_tail.as_deref().unwrap_or(""), entry.snake_color.as_deref().unwrap_or("")))
                                                     div class="snake-details" {
-                                                        a class="name" href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
-                                                            (entry.snake_name)
+                                                        @if entry.deleted {
+                                                            span class="name" { "Deleted snake" }
+                                                        } @else {
+                                                            a class="name" href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
+                                                                (entry.snake_name.as_deref().unwrap_or_default())
+                                                            }
+                                                            span class="owner" {
+                                                                "by "
+                                                                (crate::components::flag::country_flag(entry.owner_country.as_deref().unwrap_or("")))
+                                                                a href={"/users/"(entry.owner_login.as_deref().unwrap_or_default())} { (entry.owner_name.as_deref().unwrap_or_default()) }
+                                                            }
+                                                            (snake_tag_chips(snake_tags.get(&entry.battlesnake_id).map(Vec::as_slice).unwrap_or(&[])))
                                                         }
-                                                        span class="owner" {
-                                                            "by "
-                                                            (crate::components::flag::country_flag(&entry.owner_country))
-                                                            a href={"/users/"(entry.owner_login)} { (entry.owner_name) }
-                                                        }
-                                                        (snake_tag_chips(snake_tags.get(&entry.battlesnake_id).map(Vec::as_slice).unwrap_or(&[])))
                                                     }
                                                 }
                                             }
@@ -498,8 +598,12 @@ pub async fn show_leaderboard(
                                     li {
                                         span class="t" { (fmt_ago(event.created_at)) }
                                         span {
-                                            a href={"/leaderboards/"(leaderboard_id)"/entries/"(event.leaderboard_entry_id)} {
-                                                b { (event.snake_name) }
+                                            @if event.deleted {
+                                                b { "Deleted snake" }
+                                            } @else {
+                                                a href={"/leaderboards/"(leaderboard_id)"/entries/"(event.leaderboard_entry_id)} {
+                                                    b { (event.snake_name.as_deref().unwrap_or_default()) }
+                                                }
                                             }
                                             " "
                                             (render_feed_place(event.placement, event.is_draw))
@@ -518,25 +622,30 @@ pub async fn show_leaderboard(
                             @for entry in &user_entries {
                                 @if let Some(snake) = user_snakes.iter().find(|s| s.battlesnake_id == entry.battlesnake_id) {
                                     div class="mine" {
-                                        span class="chip" style={"background:"(chip_color(&snake.color))} {}
+                                        (snake_avatar(&snake.head, &snake.tail, &snake.color))
                                         span class="mname" { (snake.name) }
+                                        @if snake.retired_at.is_some() {
+                                            span class="badge" { "Retired" }
+                                        }
                                         @if entry.disabled_at.is_some() {
-                                            @if entry.disabled_reason.as_deref() == Some(leaderboard_entry_health::DISABLED_REASON_HEALTH) {
+                                            @if entry.disabled_reason.as_deref() == Some(leaderboard_registration::DISABLED_REASON_HEALTH) {
                                                 a class="badge warn" href={"/battlesnakes/"(snake.battlesnake_id)"/profile"}
                                                     title="Automatically paused: this snake is failing health checks. Resume re-tests it — details on its profile." {
                                                     "Auto-paused"
                                                 }
-                                            } @else {
+                                            } @else if entry.disabled_reason.as_deref() != Some(battlesnake::DISABLED_REASON_RETIRED) {
                                                 span class="badge" { "Paused" }
                                             }
-                                            form action={"/leaderboards/"(leaderboard_id)"/join"} method="post" {
-                                                input type="hidden" name="battlesnake_id" value=(snake.battlesnake_id);
-                                                button type="submit" class="btn sm" aria-label={"Resume " (snake.name)} { "Resume" }
+                                            @if snake.retired_at.is_none() {
+                                                form action={"/leaderboards/"(leaderboard_id)"/join"} method="post" {
+                                                    input type="hidden" name="battlesnake_id" value=(snake.battlesnake_id);
+                                                    button type="submit" class="btn sm" aria-label={"Resume " (snake.name)} { "Resume" }
+                                                }
                                             }
                                         } @else {
                                             span class="badge ok" { "Active" }
                                             form action={"/leaderboards/"(leaderboard_id)"/leave"} method="post" {
-                                                input type="hidden" name="leaderboard_entry_id" value=(entry.leaderboard_entry_id);
+                                                input type="hidden" name="battlesnake_id" value=(entry.battlesnake_id);
                                                 button type="submit" class="btn sm" aria-label={"Pause " (snake.name)} { "Pause" }
                                             }
                                         }
@@ -548,7 +657,7 @@ pub async fn show_leaderboard(
                                 }
                             }
 
-                            @let joinable: Vec<_> = user_snakes.iter().collect();
+                            @let joinable: Vec<_> = user_snakes.iter().filter(|snake| snake.retired_at.is_none()).collect();
                             @if !joinable.is_empty() {
                                 form class="join-form" action={"/leaderboards/"(leaderboard_id)"/join"} method="post" {
                                     @if needs_invite_code {
@@ -580,13 +689,17 @@ pub async fn show_leaderboard(
                                     li {
                                         span class="t" { "#" (i + 1) }
                                         span {
-                                            a href={"/leaderboards/"(leaderboard_id)"/entries/"(eater.leaderboard_entry_id)} {
-                                                b { (eater.snake_name) }
-                                            }
-                                            span class="owner-inline" {
-                                                " by "
-                                                (crate::components::flag::country_flag(&eater.owner_country))
-                                                a href={"/users/"(eater.owner_login)} { (eater.owner_name) }
+                                            @if eater.deleted {
+                                                b { "Deleted snake" }
+                                            } @else {
+                                                a href={"/leaderboards/"(leaderboard_id)"/entries/"(eater.leaderboard_entry_id)} {
+                                                    b { (eater.snake_name.as_deref().unwrap_or_default()) }
+                                                }
+                                                span class="owner-inline" {
+                                                    " by "
+                                                    (crate::components::flag::country_flag(eater.owner_country.as_deref().unwrap_or("")))
+                                                    a href={"/users/"(eater.owner_login.as_deref().unwrap_or_default())} { (eater.owner_name.as_deref().unwrap_or_default()) }
+                                                }
                                             }
                                             " · "
                                             span class="place" { (eater.food_score) " food" }
@@ -706,14 +819,29 @@ pub async fn show_leaderboard_entry(
         .await
         .wrap_err("Failed to fetch rating history")?;
 
+    // Rank within the entry's own season, so an old entry link keeps its
+    // standing after a rollover.
     let rank = leaderboard::get_rank_for_entry(
         &state.db,
-        leaderboard_id,
+        entry.season_id,
         entry.display_score,
         entry.games_played,
     )
     .await
     .wrap_err("Failed to get rank")?;
+
+    // Name the entry's season only once the league has more than one.
+    let season_badge = match leaderboard_season::select_season(&state.db, leaderboard_id, None)
+        .await
+        .wrap_err("Failed to fetch leaderboard seasons")?
+    {
+        SeasonLookup::Found(selection) if selection.seasons.len() > 1 => selection
+            .seasons
+            .into_iter()
+            .find(|info| info.season.season_id == entry.season_id)
+            .map(|info| info.season.name),
+        _ => None,
+    };
 
     // Compute SVG chart data
     let (points_str, grid_y_positions, y_labels) = if rating_points.len() >= 2 {
@@ -833,6 +961,13 @@ pub async fn show_leaderboard_entry(
                 div {
                     h1 {
                         a href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} { (snake.name) }
+                        @if snake.retired_at.is_some() {
+                            span class="badge" { "Retired" }
+                        }
+                        @if let Some(season_name) = &season_badge {
+                            " "
+                            span class="badge season" { (season_name) }
+                        }
                     }
                     div class="sub" {
                         "by "
@@ -1044,7 +1179,7 @@ pub struct JoinLeaveForm {
 
 #[derive(serde::Deserialize)]
 pub struct LeaveForm {
-    pub leaderboard_entry_id: Uuid,
+    pub battlesnake_id: Uuid,
 }
 
 /// POST /leaderboards/:id/join — opt-in a snake
@@ -1079,6 +1214,116 @@ pub async fn join_leaderboard(
         return Ok(redirect);
     }
 
+    // Verify snake belongs to user. `get_battlesnake_by_id` filters
+    // deleted snakes, so a missing/deleted snake is a flash, not a 500.
+    let Some(snake) = battlesnake::get_battlesnake_by_id(&state.db, form.battlesnake_id)
+        .await
+        .wrap_err("Failed to fetch battlesnake")
+        .with_redirect(redirect.clone())?
+    else {
+        flasher
+            .error("That battlesnake doesn't exist or has been deleted.")
+            .await
+            .wrap_err("Failed to flash")
+            .with_redirect(redirect.clone())?;
+        return Ok(redirect);
+    };
+
+    if snake.user_id != user.user_id {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("You don't own this battlesnake"),
+            redirect,
+        ));
+    }
+
+    if snake.retired_at.is_some() {
+        flasher
+            .error("This battlesnake is retired — unretire it before joining.")
+            .await
+            .wrap_err("Failed to flash")
+            .with_redirect(redirect.clone())?;
+        return Ok(redirect);
+    }
+
+    if !private_leaderboard::join_allowed(&state.db, &lb, user.user_id, form.invite_code.as_deref())
+        .await
+        .wrap_err("Failed to check invite code")
+        .with_redirect(redirect.clone())?
+    {
+        flasher
+            .error("That invite code isn't right. Ask the leaderboard's organizer for the current one.")
+            .await
+            .wrap_err("Failed to flash")
+            .with_redirect(redirect.clone())?;
+        return Ok(redirect);
+    }
+
+    // Opt-in (or resume if paused). Resuming also clears the registration's
+    // health streak, so a snake the sweeper pulled isn't re-paused on the very
+    // next sweep (see `get_or_create_registration`).
+    let Some(_registration) = leaderboard_registration::get_or_create_registration(
+        &state.db,
+        leaderboard_id,
+        form.battlesnake_id,
+    )
+    .await
+    .wrap_err("Failed to join leaderboard")
+    .with_redirect(redirect.clone())?
+    else {
+        // Raced a delete: the snake was live at the pre-check but is gone (or
+        // its registration is 'deleted'-marked) by the time the upsert ran.
+        let retired = battlesnake::get_battlesnake_by_id(&state.db, form.battlesnake_id)
+            .await
+            .wrap_err("Failed to recheck battlesnake")
+            .with_redirect(redirect.clone())?
+            .is_some_and(|snake| snake.retired_at.is_some());
+        flasher
+            .error(if retired {
+                "This battlesnake is retired — unretire it before joining."
+            } else {
+                "That battlesnake doesn't exist or has been deleted."
+            })
+            .await
+            .wrap_err("Failed to flash")
+            .with_redirect(redirect.clone())?;
+        return Ok(redirect);
+    };
+
+    // The active season's entry, created lazily. `None` (a gap between
+    // seasons) still means the join succeeded: the snake plays once the next
+    // season starts.
+    leaderboard::ensure_snake_season_entry(
+        &state.db,
+        &state.scoring,
+        leaderboard_id,
+        form.battlesnake_id,
+    )
+    .await
+    .wrap_err("Failed to create season entry")
+    .with_redirect(redirect.clone())?;
+
+    flasher
+        .success(format!(
+            "{} is in the matchmaking rotation on {} — it'll be picked up in upcoming games.",
+            snake.name, lb.name
+        ))
+        .await
+        .wrap_err("Failed to flash")
+        .with_redirect(redirect.clone())?;
+
+    Ok(redirect)
+}
+
+/// POST /leaderboards/:id/leave — pause a snake's league registration
+pub async fn leave_leaderboard(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    flasher: crate::flasher::Flasher,
+    Path(leaderboard_id): Path<Uuid>,
+    Form(form): Form<LeaveForm>,
+) -> ServerResult<impl IntoResponse, Redirect> {
+    let redirect = Redirect::to(&format!("/leaderboards/{leaderboard_id}"));
+
     // Verify snake belongs to user
     let snake = battlesnake::get_battlesnake_by_id(&state.db, form.battlesnake_id)
         .await
@@ -1098,105 +1343,100 @@ pub async fn join_leaderboard(
         ));
     }
 
-    if !private_leaderboard::join_allowed(&state.db, &lb, user.user_id, form.invite_code.as_deref())
-        .await
-        .wrap_err("Failed to check invite code")
-        .with_redirect(redirect.clone())?
-    {
+    // A registration may have no entry yet (joined during a gap), so leave
+    // is keyed on the snake, not an entry.
+    let registration =
+        leaderboard_registration::get_registration(&state.db, leaderboard_id, snake.battlesnake_id)
+            .await
+            .wrap_err("Failed to fetch registration")
+            .with_redirect(redirect.clone())?;
+    if registration.is_none() {
         flasher
-            .error("That invite code isn't right. Ask the leaderboard's organizer for the current one.")
+            .error("That battlesnake is not in this leaderboard.")
             .await
             .wrap_err("Failed to flash")
             .with_redirect(redirect.clone())?;
         return Ok(redirect);
     }
 
-    // Opt-in (or resume if paused). Resuming also clears the entry's health
-    // streak, so a snake the sweeper pulled isn't re-paused on the very next
-    // sweep (see `get_or_create_entry`).
-    let entry = leaderboard::get_or_create_entry(&state.db, leaderboard_id, form.battlesnake_id)
-        .await
-        .wrap_err("Failed to join leaderboard")
-        .with_redirect(redirect.clone())?;
-
-    // Initialize scoring algorithm entries
-    for algo in state.scoring.algorithms() {
-        algo.initialize_entry(&state.db, entry.leaderboard_entry_id)
-            .await
-            .wrap_err("Failed to initialize scoring")
-            .with_redirect(redirect.clone())?;
-    }
-
-    flasher
-        .success(format!(
-            "{} is in the matchmaking rotation on {} — it'll be picked up in upcoming games.",
-            snake.name, lb.name
-        ))
-        .await
-        .wrap_err("Failed to flash")
-        .with_redirect(redirect.clone())?;
+    leaderboard_registration::set_registration_disabled(
+        &state.db,
+        leaderboard_id,
+        snake.battlesnake_id,
+        Some(chrono::Utc::now()),
+    )
+    .await
+    .wrap_err("Failed to pause registration")
+    .with_redirect(redirect.clone())?;
 
     Ok(redirect)
 }
 
-/// POST /leaderboards/:id/leave — pause a snake
-pub async fn leave_leaderboard(
-    State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
-    Path(leaderboard_id): Path<Uuid>,
-    Form(form): Form<LeaveForm>,
-) -> ServerResult<impl IntoResponse, Redirect> {
-    let redirect = Redirect::to(&format!("/leaderboards/{leaderboard_id}"));
-
-    // Find the specific entry by ID
-    let entry = leaderboard::get_entry_by_id(&state.db, form.leaderboard_entry_id)
-        .await
-        .wrap_err("Failed to fetch entry")
-        .with_redirect(redirect.clone())?
-        .ok_or_else(|| {
-            crate::errors::ServerError(
-                color_eyre::eyre::eyre!("Leaderboard entry not found"),
-                redirect.clone(),
-            )
-        })?;
-
-    // Security: verify this entry belongs to the requested leaderboard
-    if entry.leaderboard_id != leaderboard_id {
-        return Err(crate::errors::ServerError(
-            color_eyre::eyre::eyre!("Entry does not belong to this leaderboard"),
-            redirect,
-        ));
+/// Season picker: every season of the league, the shown one marked current.
+/// Always rendered — even a lone Preseason gets its chip.
+fn season_picker(
+    leaderboard_id: Uuid,
+    seasons: &[leaderboard_season::SeasonInfo],
+    selected: Option<Uuid>,
+) -> Markup {
+    html! {
+        nav class="modes seasons" aria-label="Seasons" {
+            @for info in seasons {
+                @if selected == Some(info.season.season_id) {
+                    span class="mode on" aria-current="page" { (info.season.name) }
+                } @else {
+                    a class="mode" href={"/leaderboards/"(leaderboard_id)"?season="(info.season.season_id)} {
+                        (info.season.name)
+                    }
+                }
+            }
+        }
     }
+}
 
-    // Verify snake belongs to user
-    let snake = battlesnake::get_battlesnake_by_id(&state.db, entry.battlesnake_id)
-        .await
-        .wrap_err("Failed to fetch battlesnake")
-        .with_redirect(redirect.clone())?
-        .ok_or_else(|| {
-            crate::errors::ServerError(
-                color_eyre::eyre::eyre!("Battlesnake not found"),
-                redirect.clone(),
-            )
-        })?;
-
-    if snake.user_id != user.user_id {
-        return Err(crate::errors::ServerError(
-            color_eyre::eyre::eyre!("You don't own this battlesnake"),
-            redirect,
-        ));
+/// The one-line note above the stats when the shown season isn't the live
+/// one. Nothing for the active season.
+fn season_notice(
+    leaderboard_id: Uuid,
+    selected: Option<&leaderboard_season::SeasonInfo>,
+    league_active: Option<&leaderboard_season::SeasonInfo>,
+    next_season_starts_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Markup {
+    html! {
+        @match selected.map(|info| info.phase) {
+            Some(SeasonPhase::Active) => {}
+            Some(SeasonPhase::Ended) => {
+                p class="empty season-notice" {
+                    @if let Some(active) = league_active {
+                        "This season has ended — see the live standings in "
+                        a href={"/leaderboards/"(leaderboard_id)} { (active.season.name) }
+                        "."
+                    } @else if let Some(next) = next_season_starts_at {
+                        "This season has ended. The next one starts "
+                        (HumanTime::from(next).to_string()) "."
+                    } @else {
+                        "This season has ended."
+                    }
+                }
+            }
+            Some(SeasonPhase::Upcoming) => {
+                @if let Some(info) = selected {
+                    p class="empty season-notice" {
+                        "This season starts " (HumanTime::from(info.season.starts_at).to_string()) "."
+                    }
+                }
+            }
+            None => {
+                p class="empty season-notice" {
+                    @if let Some(next) = next_season_starts_at {
+                        "The next season starts " (HumanTime::from(next).to_string()) "."
+                    } @else {
+                        "The next season hasn't started yet."
+                    }
+                }
+            }
+        }
     }
-
-    leaderboard::set_disabled(
-        &state.db,
-        entry.leaderboard_entry_id,
-        Some(chrono::Utc::now()),
-    )
-    .await
-    .wrap_err("Failed to pause entry")
-    .with_redirect(redirect.clone())?;
-
-    Ok(redirect)
 }
 
 /// Compact relative time for rail feeds ("2m ago"), where HumanTime is too wordy.
@@ -1388,8 +1628,8 @@ mod owner_name_route_tests {
 
     async fn owner(pool: &PgPool, github_id: i64, login: &str, display_name: Option<&str>) -> Uuid {
         sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token, display_name)
-             VALUES ($1, $2, 'token', $3) RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login, display_name)
+             VALUES ($1, $2, $3) RETURNING user_id",
             github_id,
             login,
             display_name
@@ -1421,6 +1661,7 @@ mod owner_name_route_tests {
         let entry_id = leaderboard::get_or_create_entry(pool, leaderboard_id, battlesnake_id)
             .await
             .unwrap()
+            .expect("live snake joins")
             .leaderboard_entry_id;
         sqlx::query!(
             "UPDATE leaderboard_entries SET games_played = $2 WHERE leaderboard_entry_id = $1",
@@ -1430,11 +1671,13 @@ mod owner_name_route_tests {
         .execute(pool)
         .await
         .unwrap();
-        sqlx::query!(
-            "INSERT INTO food_eaten_stats (leaderboard_entry_id, food_score) VALUES ($1, $2)",
-            entry_id,
-            food_score
+        // get_or_create_entry initializes every algorithm's row, so overwrite it.
+        sqlx::query(
+            "INSERT INTO food_eaten_stats (leaderboard_entry_id, food_score) VALUES ($1, $2)
+             ON CONFLICT (leaderboard_entry_id) DO UPDATE SET food_score = EXCLUDED.food_score",
         )
+        .bind(entry_id)
+        .bind(food_score)
         .execute(pool)
         .await
         .unwrap();
@@ -1673,6 +1916,259 @@ mod owner_name_route_tests {
 }
 
 #[cfg(test)]
+mod tombstone_route_tests {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use sqlx::PgPool;
+    use tower::ServiceExt as _;
+    use uuid::Uuid;
+
+    use crate::models::leaderboard::{self, MIN_GAMES_FOR_RANKING};
+    use crate::scoring::{
+        ScoringRegistry, food_eaten::FoodEatenScoring, weng_lin::WengLinScoring,
+        win_rate::WinRateScoring,
+    };
+    use crate::state::AppState;
+
+    /// GET `path` with the production scoring algorithms registered, so the
+    /// rankings API returns real per-algorithm scores.
+    async fn get(pool: &PgPool, path: &str) -> (StatusCode, String) {
+        let mut state = AppState::test_from_pool(pool.clone());
+        let mut scoring = ScoringRegistry::new();
+        scoring.register(Box::new(WengLinScoring));
+        scoring.register(Box::new(WinRateScoring));
+        scoring.register(Box::new(FoodEatenScoring));
+        state.scoring = std::sync::Arc::new(scoring);
+        let mut builder = Request::builder().uri(path);
+        if path.starts_with("/api/") {
+            builder = builder.header(header::ORIGIN, "https://example.com");
+        }
+        let app = crate::routes::routes(state)
+            .expect("asset router")
+            .into_router();
+        let response = app
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    async fn owner(pool: &PgPool, github_id: i64, login: &str) -> Uuid {
+        sqlx::query_scalar!(
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
+            github_id,
+            login
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Adds a snake to the leaderboard with the given games played and food
+    /// score, returning its leaderboard entry id.
+    async fn entry(
+        pool: &PgPool,
+        leaderboard_id: Uuid,
+        user_id: Uuid,
+        name: &str,
+        games_played: i32,
+        food_score: i64,
+    ) -> Uuid {
+        let battlesnake_id = sqlx::query_scalar!(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, $2, 'http://snake') RETURNING battlesnake_id",
+            user_id,
+            name
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let entry_id = leaderboard::get_or_create_entry(pool, leaderboard_id, battlesnake_id)
+            .await
+            .unwrap()
+            .expect("live snake joins")
+            .leaderboard_entry_id;
+        sqlx::query!(
+            "UPDATE leaderboard_entries SET games_played = $2 WHERE leaderboard_entry_id = $1",
+            entry_id,
+            games_played
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        // get_or_create_entry initializes every algorithm's row, so overwrite it.
+        sqlx::query(
+            "INSERT INTO food_eaten_stats (leaderboard_entry_id, food_score) VALUES ($1, $2)
+             ON CONFLICT (leaderboard_entry_id) DO UPDATE SET food_score = EXCLUDED.food_score",
+        )
+        .bind(entry_id)
+        .bind(food_score)
+        .execute(pool)
+        .await
+        .unwrap();
+        entry_id
+    }
+
+    /// Ended-season standings tombstone soft-deleted snakes on the league
+    /// page and the rankings API: the row and its rank stay, identity is
+    /// blanked, no links to the snake or its owner.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn ended_season_standings_tombstone_deleted_snakes(pool: PgPool) {
+        let leaderboard_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboards (name) VALUES ('tombstone-league') RETURNING leaderboard_id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let live_owner = owner(&pool, 9932101, "gh-live").await;
+        let ghost_owner = owner(&pool, 9932102, "gh-ghost").await;
+        let live = entry(
+            &pool,
+            leaderboard_id,
+            live_owner,
+            "Live Lass",
+            MIN_GAMES_FOR_RANKING + 2,
+            7,
+        )
+        .await;
+        let ghost_ranked = entry(
+            &pool,
+            leaderboard_id,
+            ghost_owner,
+            "Ghost Racer",
+            MIN_GAMES_FOR_RANKING + 1,
+            0,
+        )
+        .await;
+        let ghost_placement =
+            entry(&pool, leaderboard_id, ghost_owner, "Ghost Placement", 1, 0).await;
+        // Rank order: the live snake leads the frozen standings.
+        for (entry_id, score) in [(live, 50.0), (ghost_ranked, 40.0)] {
+            sqlx::query(
+                "UPDATE leaderboard_entries SET display_score = $2
+                 WHERE leaderboard_entry_id = $1",
+            )
+            .bind(entry_id)
+            .bind(score)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // The Preseason ends, then the ghosts are deleted through the real
+        // flow (registrations disabled exactly as in prod).
+        sqlx::query(
+            "UPDATE leaderboard_seasons
+             SET starts_at = clock_timestamp() - interval '30 days',
+                 ends_at = clock_timestamp() - interval '1 day'
+             WHERE leaderboard_id = $1",
+        )
+        .bind(leaderboard_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        for entry_id in [ghost_ranked, ghost_placement] {
+            let snake_id: Uuid = sqlx::query_scalar(
+                "SELECT battlesnake_id FROM leaderboard_entries WHERE leaderboard_entry_id = $1",
+            )
+            .bind(entry_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                crate::models::battlesnake::delete_battlesnake(&pool, snake_id, ghost_owner)
+                    .await
+                    .unwrap(),
+                crate::models::battlesnake::DeleteBattlesnakeOutcome::Deleted
+            );
+        }
+        let season: Uuid = sqlx::query_scalar(
+            "SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1",
+        )
+        .bind(leaderboard_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // League page: tombstones render in the ranked and placement rows
+        // with their ranks; nothing links the ghosts' names or owner.
+        let (status, body) = get(
+            &pool,
+            &format!("/leaderboards/{leaderboard_id}?season={season}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body.matches("Deleted snake").count(),
+            2,
+            "ranked + placement rows: {body}"
+        );
+        assert!(body.contains("Live Lass"), "{body}");
+        assert!(!body.contains("Ghost Racer"), "{body}");
+        assert!(!body.contains("Ghost Placement"), "{body}");
+        assert!(!body.contains("/users/gh-ghost"), "{body}");
+        assert!(body.contains(r#"<td class="rank">01</td>"#), "{body}");
+        assert!(body.contains(r#"<td class="rank">02</td>"#), "{body}");
+
+        // Rankings API: tombstone rows keep id, rank, and stats; identity
+        // fields are null. Both `ranked` and `placement` share the mapper.
+        let (status, body) = get(
+            &pool,
+            &format!("/api/leaderboards/{leaderboard_id}/rankings?season={season}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let ranked = json["ranked"].as_array().unwrap();
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0]["snake_name"], "Live Lass");
+        assert_eq!(ranked[0]["owner"], "gh-live");
+        assert_eq!(ranked[0]["deleted"], false);
+        assert_eq!(ranked[1]["rank"], 2);
+        assert_eq!(ranked[1]["snake_name"], serde_json::Value::Null);
+        assert_eq!(ranked[1]["owner"], serde_json::Value::Null);
+        assert_eq!(ranked[1]["owner_name"], serde_json::Value::Null);
+        assert_eq!(ranked[1]["deleted"], true);
+        assert_eq!(ranked[1]["games_played"], MIN_GAMES_FOR_RANKING + 1);
+        assert_eq!(ranked[1]["display_score"], 40.0);
+        let live_score_keys = {
+            let mut keys: Vec<&str> = ranked[0]["scores"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(|k| k.as_str())
+                .collect();
+            keys.sort_unstable();
+            keys
+        };
+        let mut ghost_score_keys: Vec<&str> = ranked[1]["scores"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        ghost_score_keys.sort_unstable();
+        assert_eq!(
+            ghost_score_keys, live_score_keys,
+            "tombstone keeps its per-algorithm scores"
+        );
+
+        let placement = json["placement"].as_array().unwrap();
+        assert_eq!(placement.len(), 1);
+        assert_eq!(placement[0]["snake_name"], serde_json::Value::Null);
+        assert_eq!(placement[0]["owner"], serde_json::Value::Null);
+        assert_eq!(placement[0]["owner_name"], serde_json::Value::Null);
+        assert_eq!(placement[0]["deleted"], true);
+        assert_eq!(placement[0]["games_played"], 1);
+    }
+}
+
+#[cfg(test)]
 mod column_route_tests {
     use axum::{
         body::{Body, to_bytes},
@@ -1719,8 +2215,8 @@ mod column_route_tests {
         .await
         .unwrap();
         let user_id = sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, 'token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
             github_id,
             format!("gh-{github_id}")
         )
@@ -1738,6 +2234,7 @@ mod column_route_tests {
         let entry_id = leaderboard::get_or_create_entry(pool, leaderboard_id, battlesnake_id)
             .await
             .unwrap()
+            .expect("live snake joins")
             .leaderboard_entry_id;
         sqlx::query!(
             "UPDATE leaderboard_entries SET games_played = $2 WHERE leaderboard_entry_id = $1",
@@ -1747,10 +2244,12 @@ mod column_route_tests {
         .execute(pool)
         .await
         .unwrap();
-        sqlx::query!(
-            "INSERT INTO food_eaten_stats (leaderboard_entry_id, food_score) VALUES ($1, 5)",
-            entry_id
+        // get_or_create_entry initializes every algorithm's row, so overwrite it.
+        sqlx::query(
+            "INSERT INTO food_eaten_stats (leaderboard_entry_id, food_score) VALUES ($1, 5)
+             ON CONFLICT (leaderboard_entry_id) DO UPDATE SET food_score = EXCLUDED.food_score",
         )
+        .bind(entry_id)
         .execute(pool)
         .await
         .unwrap();
@@ -1788,5 +2287,187 @@ mod column_route_tests {
             assert_eq!(body.contains("Food Eaten"), has_food, "{name} entry scores");
             assert!(body.contains("Win Rate"), "{name} entry scores");
         }
+    }
+}
+
+#[cfg(test)]
+mod cosmetics_route_tests {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use sqlx::PgPool;
+    use tower::ServiceExt as _;
+    use uuid::Uuid;
+
+    use crate::models::leaderboard::{self, MIN_GAMES_FOR_RANKING};
+    use crate::state::AppState;
+
+    async fn get(pool: &PgPool, path: &str) -> (StatusCode, String) {
+        let app = crate::routes::routes(AppState::test_from_pool(pool.clone()))
+            .expect("asset router")
+            .into_router();
+        let response = app
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    async fn owner(pool: &PgPool, github_id: i64, login: &str) -> Uuid {
+        sqlx::query_scalar!(
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
+            github_id,
+            login
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Adds a snake with the given cosmetic look (color, head, tail) to the
+    /// leaderboard at the given games played, returning its entry id.
+    async fn entry(
+        pool: &PgPool,
+        leaderboard_id: Uuid,
+        user_id: Uuid,
+        name: &str,
+        games_played: i32,
+        look: (&str, &str, &str),
+    ) -> Uuid {
+        let battlesnake_id = sqlx::query_scalar!(
+            "INSERT INTO battlesnakes (user_id, name, url, color, head, tail)
+             VALUES ($1, $2, 'http://snake', $3, $4, $5) RETURNING battlesnake_id",
+            user_id,
+            name,
+            look.0,
+            look.1,
+            look.2
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let entry_id = leaderboard::get_or_create_entry(pool, leaderboard_id, battlesnake_id)
+            .await
+            .unwrap()
+            .expect("live snake joins")
+            .leaderboard_entry_id;
+        sqlx::query!(
+            "UPDATE leaderboard_entries SET games_played = $2 WHERE leaderboard_entry_id = $1",
+            entry_id,
+            games_played
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        entry_id
+    }
+
+    /// Ranked and placement rows each show their own snake's head and tail
+    /// art (the mini avatar that replaced the plain colour chip), and the
+    /// declared colour flows through `--snake`.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn ranked_and_placement_rows_show_their_own_head_and_tail(pool: PgPool) {
+        let leaderboard_id = leaderboard::get_active_leaderboards(&pool)
+            .await
+            .unwrap()
+            .first()
+            .expect("migrations seed an active leaderboard")
+            .leaderboard_id;
+
+        let user = owner(&pool, 9931001, "gh-cosmetic").await;
+        entry(
+            &pool,
+            leaderboard_id,
+            user,
+            "cosmetic-ranked",
+            MIN_GAMES_FOR_RANKING,
+            ("#FF4F86", "alligator", "bolt"),
+        )
+        .await;
+        entry(
+            &pool,
+            leaderboard_id,
+            user,
+            "cosmetic-placement",
+            MIN_GAMES_FOR_RANKING - 1,
+            ("", "", ""),
+        )
+        .await;
+        entry(
+            &pool,
+            leaderboard_id,
+            user,
+            "cosmetic-puffin",
+            MIN_GAMES_FOR_RANKING,
+            ("#da8a1a", "beach-puffin-special", "beach-puffin-special"),
+        )
+        .await;
+
+        let (status, body) = get(&pool, &format!("/leaderboards/{leaderboard_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let head_d = crate::og::board::shape(arena::design_kit::AssetKind::Head, "alligator")
+            .expect("alligator in catalog")
+            .d;
+        let tail_d = crate::og::board::shape(arena::design_kit::AssetKind::Tail, "bolt")
+            .expect("bolt in catalog")
+            .d;
+        let default_d = crate::og::board::shape(arena::design_kit::AssetKind::Head, "default")
+            .expect("default in catalog")
+            .d;
+
+        // Exactly once each: a regression that gives every row the same art
+        // trips these, and the default shape doubling as the fallback means
+        // only an exact count distinguishes "default snake rendered" from
+        // "custom slug ignored".
+        assert_eq!(body.matches(head_d).count(), 1, "alligator head once");
+        assert_eq!(body.matches(tail_d).count(), 1, "bolt tail once");
+        assert_eq!(body.matches(default_d).count(), 1, "default head once");
+
+        assert!(
+            body.contains(r#"style="--snake: #ff4f86""#),
+            "declared colour not lowered into --snake"
+        );
+        assert!(body.contains(r#"class="snake-avatar""#), "{body}");
+
+        // Multi-colour special art keeps its fixed accents end to end
+        // (DB slug -> avatar markup): the puffin's orange beak.
+        assert!(
+            body.contains(r#"style="fill: #e84600""#),
+            "puffin beak layer missing from the leaderboard page"
+        );
+    }
+
+    /// The home page's "Top of the ladder" preview shows the same avatar.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn home_ladder_preview_shows_head_and_tail(pool: PgPool) {
+        let leaderboard_id = leaderboard::get_active_leaderboards(&pool)
+            .await
+            .unwrap()
+            .first()
+            .expect("migrations seed an active leaderboard")
+            .leaderboard_id;
+
+        let user = owner(&pool, 9931002, "gh-home-cosmetic").await;
+        entry(
+            &pool,
+            leaderboard_id,
+            user,
+            "home-cosmetic-ranked",
+            MIN_GAMES_FOR_RANKING,
+            ("#FF4F86", "alligator", "bolt"),
+        )
+        .await;
+
+        let (status, body) = get(&pool, "/").await;
+        assert_eq!(status, StatusCode::OK);
+        let head_d = crate::og::board::shape(arena::design_kit::AssetKind::Head, "alligator")
+            .expect("alligator in catalog")
+            .d;
+        assert!(body.contains(head_d), "home ladder avatar missing");
     }
 }

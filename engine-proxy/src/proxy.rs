@@ -736,8 +736,10 @@ async fn buffer_request_body(
 ///
 /// Phase-split consequence: once a 200 status line has been forwarded, no
 /// 504 can follow — a body-phase breach kills the connection, which arena
-/// sees as a transport fault (`ProxyCall::Fault { kind: "transport" }` →
-/// fallback, `timed_out: false`), not a 504.
+/// classifies as a proxy transport fault (`ProxyCall::Fault { kind:
+/// "transport" }`): the `/move` is retried directly with the snake's full
+/// fresh timeout, and the turn carries the direct call's real result (its
+/// move, latency, status), never a fallback (docs/engine-proxy.md, case 17b).
 pub struct DeadlineBody {
     inner: Incoming,
     sleep: Pin<Box<tokio::time::Sleep>>,

@@ -99,16 +99,21 @@ fn privacy_content() -> Markup {
                 "and the UTC date of activity."
             }
             p {
-                "Battlesnake also keeps technical logs in an observability system "
-                "we run ourselves. For every request, those logs store the full "
-                "request URL (including any query string), the referring page, "
-                "the IP address, and the browser user agent. For signed-in "
-                "requests, they also store your account ID. Gameplay telemetry "
-                "in the same system ties account IDs and snake IDs to the games "
-                "they took part in. Sign-in events include your GitHub username, "
-                "and Play account claim events include your Play username. This "
-                "data has no fixed deletion date, and deleting your account does "
-                "not remove what was already recorded there."
+                "We keep operational logs, traces, and product analytics in an "
+                "observability system we run ourselves and in PostHog (US cloud), "
+                "our analytics processor. This data can include account identifiers, "
+                "usernames, email addresses, snake names and URLs, IP addresses, "
+                "browser user agents, request URLs and referrers, game data, and "
+                "message contents."
+            }
+            p {
+                "Credentials, including passwords, tokens, secret URL parameters, "
+                "authorization headers, and cookie headers, are removed before "
+                "data goes to PostHog."
+            }
+            p {
+                "This data has no fixed deletion date, and deleting your account "
+                "does not remove what was already recorded."
             }
 
             h3 { "Play.battlesnake.com Migration Data" }
@@ -139,6 +144,7 @@ fn privacy_content() -> Markup {
                     "aggregate form; published statistics never identify individual accounts."
                 }
                 li { "Operate, debug, and improve Battlesnake using the technical logs described above." }
+                li { "Analyze product events and server telemetry using PostHog." }
                 li { "Send transactional email (via Mailgun) when your play account is claimed, as a security notice." }
                 li { "Notify you by email if your snake is removed from leaderboard matchmaking because its server keeps failing." }
             }
@@ -149,7 +155,8 @@ fn privacy_content() -> Markup {
                 "Mailgun for transactional email, Google Cloud for hosting and "
                 "storage, TypeSafe for automated moderation of snake names, "
                 "tournament names and descriptions, saved game titles, and snake "
-                "shouts, and the providers that host our observability system. "
+                "shouts, the providers that host our observability system, and "
+                "PostHog (US cloud) for analytics. "
                 "We also post new sign-ups, Play account claims, and newly "
                 "registered snakes to the Battlesnake community Discord, and "
                 "those posts include GitHub usernames, Play usernames, and snake "
@@ -161,9 +168,14 @@ fn privacy_content() -> Markup {
                 "Battlesnake is hosted on Google Cloud. Game data from the legacy "
                 "Battlesnake Engine may be archived to Google Cloud Storage. "
                 "Technical logs are stored with the providers that host our "
-                "observability system. Google Cloud also keeps server and load "
-                "balancer logs for a short time, which can contain the same kinds "
-                "of technical details described above."
+                "observability system and with PostHog (US cloud). PostHog product "
+                "events and boot manifests have no fixed deletion date unless a "
+                "verified project retention setting says otherwise. Google Cloud "
+                "also keeps server and load "
+                "balancer logs for a short time, which can contain account "
+                "identifiers, usernames, email addresses, snake names and URLs, "
+                "IP addresses, browser user agents, request URLs and referrers, "
+                "game data, and message contents."
             }
 
             h2 { "Cookies" }
@@ -264,6 +276,14 @@ mod tests {
         assert!(html.contains("Cookies"));
         assert!(html.contains("Contact"));
         assert!(html.contains(PRIVACY_EFFECTIVE_DATE));
+        assert_eq!(PRIVACY_EFFECTIVE_DATE, "November 2026");
+        assert!(html.contains("PostHog (US cloud)"));
+        assert!(html.contains("operational logs, traces, and product analytics"));
+        assert!(html.contains(
+            "balancer logs for a short time, which can contain account identifiers, \
+             usernames, email addresses, snake names and URLs, IP addresses, \
+             browser user agents, request URLs and referrers, game data, and message contents."
+        ));
     }
 
     #[test]

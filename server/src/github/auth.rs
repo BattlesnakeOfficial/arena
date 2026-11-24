@@ -20,20 +20,13 @@ pub struct GitHubAuthParams {
     pub state: String,
 }
 
-// GitHub API response for token exchange
+// GitHub API response for token exchange. Only the access token is used
+// (the callback's Bearer header); serde ignores the rest of GitHub's JSON
+// (no deny_unknown_fields), so unused fields are deleted rather than
+// #[allow(dead_code)]'d.
 #[derive(Debug, Deserialize)]
 pub struct GitHubTokenResponse {
     pub access_token: String,
-    // These fields are required for proper deserialization of GitHub's API response
-    // but are not used in our code
-    #[allow(dead_code)]
-    pub token_type: String,
-    #[allow(dead_code)]
-    pub scope: String,
-    #[serde(default)]
-    pub refresh_token: Option<String>,
-    #[serde(default)]
-    pub expires_in: Option<i64>,
 }
 
 // GitHub API response for user data

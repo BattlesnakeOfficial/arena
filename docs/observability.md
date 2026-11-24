@@ -1,6 +1,55 @@
-# Eyes observability
+# Eyes and PostHog observability
 
-Arena declares its operational contract in `server/src/observability.rs`. One
+Arena declares metrics, alerts, and all three dashboards once in
+`server/src/observability_declarations.rs`. `server/src/observability.rs` attaches
+them to the full Eyes boot manifest. The post-deploy `posthog-sync` job projects
+eligible product, telemetry, and ratio metrics and compatible dashboard items
+as tagged PostHog insights. It preserves stat, table, and window presentation
+and emits the health tile. Eligibility depends on the metric's query, not just
+a `product.*` ID.
+
+Telemetry alerts remain Eyes-only: all Arena alerts use telemetry metrics, and
+cja skips them as `PostHog-unsupported: SQL alert payload and NULL evaluation
+unverified`.
+Links items also remain Eyes-only. The sync reports these items as skipped.
+The 90- and 364-day history tiles and 28-day stickiness show no value until
+every source has full boundary coverage (see cja's `docs/posthog-sync.md`).
+
+The runtime needs only `POSTHOG_PROJECT_TOKEN`, the public ingestion token,
+set in Cloud Run Terraform. It sends OTLP logs and traces with
+`service.name=arena` and captures explicit `cja::product_event!` calls. Capture
+is lossy and independent of request success. Product capture covers
+`user_authenticated`, `battlesnake_created`, `play_claim_succeeded`,
+`achievement_earned`, `share_page_view`, `share_action`, and `share_cta_click`.
+An acting user's opaque account ID is the PostHog distinct ID; anonymous share
+visitors get an anonymous distinct ID. New Eyes and Cloud Logging copies of
+the sign-in and Play-claim events omit GitHub and Play usernames. Existing
+Eyes telemetry, manifest registration, and heartbeat continue during the trial.
+PostHog receives the recorded enqueue `jobs.enqueue` span's Debug `self`, the
+run `jobs.run_from_value` span's serialized `value`, and job serde
+`error.detail` as Eyes does. These fields can contain background-job payloads
+and error text. Named credential headers and known secret query parameters in
+`uri`, `url.query`, and referer remain redacted.
+
+The GitHub Actions sync job needs `POSTHOG_PROJECT_ID` as a repo variable and
+`POSTHOG_PERSONAL_API_KEY` as a repo secret. They are never runtime settings.
+Missing CI settings skip sync with a notice; a successful deploy alone does
+not prove a dashboard exists. The management API uses `us.posthog.com`; runtime
+ingestion defaults to `us.i.posthog.com`.
+
+Before rollout, confirm the Cloud Run revision has `GCP_LOGGING=true`,
+`RUST_LOG=info`, the Eyes IDs, and the `POSTHOG_PROJECT_TOKEN` env name. Check
+the boot log for `PostHog OTLP layer configured`, an arena log and trace in
+PostHog, a durable boot manifest event, all captured event families, the
+tagged PostHog dashboards created by the sync, and the three Eyes dashboards
+plus heartbeat.
+Run an unchanged second sync and require zero creates, updates, and deletes.
+Keep deployment outside every shutdown-email send window.
+
+Arena declares its metrics, alerts, and dashboards in
+`server/src/observability_declarations.rs`. `server/src/observability.rs` adds
+the rest of its operational contract (process role, HTTP checks, critical jobs)
+to the boot manifest and runs the heartbeat. One
 boot-stable `ProcessIdentity` is shared by the tracing subscriber, boot manifest,
 and heartbeat in both GCP and local tracing paths. Registration is bounded and
 best effort after workers start; a registration failure is logged without
@@ -23,8 +72,10 @@ attempts/failures. It uses existing tracing fields. Request counts include
 `/health` checks; failure-event counts include retry attempts, not unique jobs.
 HTTP duration metrics are microseconds; game timings are milliseconds.
 
-The `arena-product` dashboard defaults to a 30-day range and reads events only
-(fields present at emission). Per-source and new-user series start at deploy:
+The `arena-product` dashboard defaults to a 30-day range. Most of its
+metrics read events (fields present at emission); the owner and snake
+tiles read `snake.lifecycle` span rows, on the row written when the span
+opens. Per-source and new-user series start at deploy:
 pre-deploy events carry no `source` or `new_user` fields, so those charts and
 the filtered tiles cover post-deploy data only. `user_id` and `auth_type`
 (`session` or `token`) for authenticated requests are queryable: auth code
@@ -34,8 +85,10 @@ the `finished processing request` event — filter `target ==
 series starts at deploy. Both fields are also on the JSON stdout line, because
 `GcpJsonFormatter` prints event fields. So they reach Google Cloud Logging,
 where the `_Default` bucket keeps them for 7 days. The privacy policy says
-Google Cloud keeps server and load balancer logs "for a short time", and that
-they can hold the same kinds of details it lists for our observability system.
+Google Cloud keeps server and load balancer logs "for a short time" and
+explicitly lists account identifiers, usernames, email addresses, snake names
+and URLs, IP addresses, browser user agents, request URLs and referrers, game
+data, and message contents as possible contents.
 So it depends on that retention, which is set by hand, not in Terraform. If
 the retention grows, or a new kind of personal data reaches these logs, the
 policy has to change too. Query them in Eyes, which is where the product
@@ -68,6 +121,37 @@ event means the attempt bailed out before any render work ran. A
 climbing `failed` rate or `ms` trend there is the signal to investigate clip
 rendering; the share page and clip route emit nothing.
 
+The dashboard also carries fixed-window tiles (DEV-2062): both active-user
+definitions — distinct users with an authenticated request and distinct
+owners whose snake played a game — plus active snakes and games played,
+each over its own trailing 1-, 7-, or 28-day window, with the definition
+and window in the tile's title so the numbers never depend on the page
+range. Stickiness tiles show the 1-day and 7-day actives as a percentage
+of the 28-day actives for each definition, and source-share tiles show
+each source's 7-day share of games played. The 90-day daily and 364-day
+Monday-week charts live on the separate `arena-product-history`
+dashboard, so the product page never pays for year-long lake scans.
+The Monday-week charts run over a trailing window, so the first bucket
+starts mid-week or at the lake's history start and has a partial count,
+and the current week's bucket at the end is partial too — the last point
+reading low is not a drop.
+History windows clamp to the lake's history start and show a `data from`
+chip until coverage grows (about 2027-09-24 for a full 364 days); a first
+load after idle can 503 near 50 s and answers on reload; and the year
+charts are projected to outgrow the ~50 s lake call budget around
+2027-01..2027-03. Raising that budget is an Eyes code change, tracked in
+DEV-2087 (trigger: any 364-day chart over 35 s warm, or 2026-12-31,
+whichever comes first). Each active definition's 28-day numbers are only
+meaningful about 28 days after its source went live — close-event
+`user_id` from DEV-2076's deploy and `snake.lifecycle` from 2026-11-03
+(owners ≈ 2026-12-01) — and until then the 28-day tiles read low and
+stickiness reads high while still reporting `complete: true`. By-source
+numbers start at DEV-2061's deploy on 2026-11-03 (pre-deploy
+`game_completed` rows carry a null `source`), so source shares read low
+until 2026-11-10 and the by-source weekly charts are empty before that
+week; the `data from` chip overstates the active and source fields'
+coverage in the same period.
+
 Processing overhead measures elapsed turn-loop time minus elapsed time awaiting
 parallel move requests, including persistence and scheduling. The old event
 subtracted summed snake latencies, double-counting overlapping requests and
@@ -93,13 +177,16 @@ under query budgets; Eyes exposes that state instead of claiming an exact result
 
 ## Release sequence
 
-1. Publish `eyes-query` 0.1.0, then `eyes-subscriber` 0.8.0 from the Eyes repo
-   (its server already accepts these contracts).
-2. Merge cja's subscriber bump / `TracingConfig` process-identity support.
-3. Update Arena's lockfile to that cja commit and published subscriber. Confirm
-   only one subscriber version with `cargo tree -i eyes-subscriber`.
-4. Deploy Arena, then verify its process role, heartbeat, run-health declarations,
-   all 28 named metrics, both thresholds, and both dashboards in production Eyes.
+1. Deploy the Eyes server carrying DEV-2058 (`count_distinct`), DEV-2059
+   (per-item windows, history clamping), DEV-2060 (Monday weeks), and
+   DEV-2065 (ratio metrics).
+2. Publish `eyes-subscriber` 0.10.x from the Eyes repo.
+3. Bump cja's subscriber requirement to `0.10` and release cja.
+4. Update Arena's lockfile to the published subscriber and released cja
+   (confirm exactly one subscriber version with `cargo tree -i
+   eyes-subscriber`), then deploy Arena and verify the process role,
+   heartbeat, and run-health declarations, all named metrics, both
+   thresholds, and all three dashboards in production Eyes.
 
 Local validation before publication uses an uncommitted Cargo patch file for
 cja, eyes-query, and eyes-subscriber. Those path overrides must not ship. Live
@@ -170,8 +257,12 @@ failure never ages out early. The per-turn `db_write_latency` and
 thresholds read them over 24-hour and 7-day windows.
 
 Per-turn telemetry reaches Eyes only while the tracing filter admits DEBUG for
-arena. Production's `RUST_LOG` is `info,arena=debug`; dropping `arena=debug`
-silently removes every per-turn phase from Eyes.
+arena. PostHog also needs `POSTHOG_LOG_LEVEL` (default `info`) to admit DEBUG.
+Production pins `RUST_LOG=info`, so DEBUG per-turn phase events are omitted from
+Eyes, PostHog, and Cloud Logging. For a targeted diagnostic,
+`RUST_LOG=info,arena=debug` admits them to Eyes and Cloud Logging; PostHog keeps
+dropping them unless `POSTHOG_LOG_LEVEL` is lowered too. Restore `info`
+afterward to avoid the per-turn volume.
 
 To cut stdout volume without touching Eyes, set `ARENA_STDOUT_LOG` (same
 directive syntax as `RUST_LOG`). It narrows only the JSON stdout layer:

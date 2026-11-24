@@ -1,0 +1,100 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            le.leaderboard_entry_id, le.leaderboard_id, le.season_id AS \"season_id!\", le.battlesnake_id,\n            le.mu, le.sigma, le.display_score, le.games_played, le.first_place_finishes, le.non_first_finishes,\n            le.disabled_at, le.disabled_reason, le.created_at, le.updated_at\n         FROM leaderboard_entries le\n         JOIN leaderboard_seasons s ON s.season_id = le.season_id\n         JOIN leaderboard_registrations r\n           ON r.leaderboard_id = le.leaderboard_id AND r.battlesnake_id = le.battlesnake_id\n         JOIN battlesnakes b ON b.battlesnake_id = le.battlesnake_id\n         WHERE le.leaderboard_id = $1\n           AND s.starts_at <= clock_timestamp()\n           AND (s.ends_at IS NULL OR clock_timestamp() < s.ends_at)\n           AND r.disabled_at IS NULL\n           AND b.deleted_at IS NULL AND b.retired_at IS NULL\n         ORDER BY le.display_score DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "leaderboard_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "season_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "mu",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 5,
+        "name": "sigma",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 6,
+        "name": "display_score",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 7,
+        "name": "games_played",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "first_place_finishes",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "non_first_finishes",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "disabled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "disabled_reason",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 13,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "acecbfddb41c0bb393ce6452903d4158cbb9c7d2440cc07fddaa32926f2259ae"
+}

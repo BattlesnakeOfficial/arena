@@ -1240,8 +1240,8 @@ mod moderation_tests {
 
     async fn create_user_row(pool: &PgPool, github_id: i64, is_admin: bool) -> cja::Result<Uuid> {
         let row = sqlx::query!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token, is_admin)
-             VALUES ($1, $2, 'test-token', $3)
+            "INSERT INTO users (external_github_id, github_login, is_admin)
+             VALUES ($1, $2, $3)
              RETURNING user_id",
             github_id,
             format!("gh-user-{github_id}"),
@@ -1261,8 +1261,8 @@ mod moderation_tests {
             .await?
             .expect("just-created user");
         let session = crate::models::session::create_session(pool).await?;
-        crate::models::session::associate_user_with_session(pool, session.session_id, user_id)
-            .await?;
+        let session =
+            crate::models::session::rotate_session(pool, session.session_id, user_id).await?;
         Ok((user, session))
     }
 
@@ -1414,6 +1414,7 @@ mod moderation_tests {
                 crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
                 axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
                     engine_region: None,
+                    allow_tournament_import: true,
                     name: "Bad".to_string(),
                     url: "https://e.co".to_string(),
                     is_public: true,
@@ -1496,6 +1497,7 @@ mod moderation_tests {
             crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
             axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
                 engine_region: None,
+                allow_tournament_import: true,
                 name: "Slitherbot".to_string(),
                 url: "https://e.co".to_string(),
                 is_public: true,
@@ -1544,6 +1546,7 @@ mod moderation_tests {
             crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
             axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
                 engine_region: None,
+                allow_tournament_import: true,
                 name: "SlowJudge".to_string(),
                 url: "https://e.co".to_string(),
                 is_public: true,
@@ -1584,6 +1587,7 @@ mod moderation_tests {
             crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
             axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
                 engine_region: None,
+                allow_tournament_import: true,
                 name: "NoKey".to_string(),
                 url: "https://e.co".to_string(),
                 is_public: true,
@@ -1620,6 +1624,7 @@ mod moderation_tests {
             crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
             axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
                 engine_region: None,
+                allow_tournament_import: true,
                 name: "FlaggedName".to_string(),
                 url: "https://e.co".to_string(),
                 is_public: true,
@@ -1651,6 +1656,7 @@ mod moderation_tests {
             crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
             axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
                 engine_region: None,
+                allow_tournament_import: true,
                 name: "RelayMe".to_string(),
                 url: "https://e.co/x".to_string(),
                 is_public: true,
@@ -1754,6 +1760,7 @@ mod moderation_tests {
             axum::extract::Path(snake_id),
             axum::Json(crate::routes::api::snakes::UpdateSnakeRequest {
                 engine_region: None,
+                allow_tournament_import: None,
                 name: None,
                 url: Some("https://e.co/again".to_string()),
                 is_public: None,
@@ -2337,12 +2344,9 @@ mod moderation_tests {
         let (_user, session) = user_with_session(&pool, 9417).await?;
         let admin_id = create_user_row(&pool, 9418, true).await?;
         let admin_session = crate::models::session::create_session(&pool).await?;
-        crate::models::session::associate_user_with_session(
-            &pool,
-            admin_session.session_id,
-            admin_id,
-        )
-        .await?;
+        let admin_session =
+            crate::models::session::rotate_session(&pool, admin_session.session_id, admin_id)
+                .await?;
 
         let state = crate::state::AppState::test_from_pool(pool.clone());
 

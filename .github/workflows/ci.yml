@@ -110,3 +110,13 @@ jobs:
             --region ${{ secrets.GCP_REGION }} \
             --image ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REGISTRY }}/arena:${{ github.sha }} \
             --update-env-vars "$update_env_vars"
+
+  posthog:
+    name: Sync PostHog declarations
+    needs: deploy
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    uses: coreyja-studio/.github/.github/workflows/posthog-sync.yml@main
+    with:
+      project-id: ${{ vars.POSTHOG_PROJECT_ID }}
+    secrets:
+      POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}

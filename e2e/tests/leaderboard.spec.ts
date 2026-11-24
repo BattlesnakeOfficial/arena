@@ -1,5 +1,5 @@
 import { test, expect, createMockUser } from '../fixtures/test';
-import { query } from '../fixtures/db';
+import { query, registerFixtureEntries } from '../fixtures/db';
 
 test.describe('Leaderboard Pages', () => {
   test('live standings refresh when an in-progress game finishes', async ({ authenticatedPage }, testInfo) => {
@@ -20,7 +20,8 @@ test.describe('Leaderboard Pages', () => {
       );
       gameId = game.game_id;
       await query(
-        'INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)',
+        `INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id)
+         VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))`,
         [leaderboardId, gameId]
       );
 
@@ -127,18 +128,19 @@ test.describe('Leaderboard Pages', () => {
       "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'"
     );
     const [entry] = await query<{ leaderboard_entry_id: string }>(
-      `INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-       VALUES ($1, $2) RETURNING leaderboard_entry_id`,
+      `INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+       VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2) RETURNING leaderboard_entry_id`,
       [leaderboard.leaderboard_id, snake.battlesnake_id]
     );
+    await registerFixtureEntries();
     for (let i = 0; i < 12; i++) {
       const [game] = await query<{ game_id: string }>(
         `INSERT INTO games (board_size, game_type, status)
          VALUES ('11x11', 'Standard', 'finished') RETURNING game_id`
       );
       const [lg] = await query<{ leaderboard_game_id: string }>(
-        `INSERT INTO leaderboard_games (leaderboard_id, game_id)
-         VALUES ($1, $2) RETURNING leaderboard_game_id`,
+        `INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id)
+         VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1)) RETURNING leaderboard_game_id`,
         [leaderboard.leaderboard_id, game.game_id]
       );
       await query(
@@ -187,7 +189,7 @@ test.describe('Leaderboard Pages', () => {
     );
     const snakeId = snakes[0].battlesnake_id;
     await query(
-      `UPDATE leaderboard_entries
+      `UPDATE leaderboard_registrations
        SET disabled_at = NOW(), disabled_reason = 'health',
            health_consecutive_failures = 3,
            health_last_failure = 'POST /move (turn 0): request timed out'
@@ -212,7 +214,7 @@ test.describe('Leaderboard Pages', () => {
       health_last_failure: string | null;
     }>(
       `SELECT health_consecutive_failures, health_last_failure
-       FROM leaderboard_entries WHERE battlesnake_id = $1`,
+       FROM leaderboard_registrations WHERE battlesnake_id = $1`,
       [snakeId]
     );
     expect(health[0].health_consecutive_failures).toBe(0);
@@ -418,7 +420,7 @@ test.describe('Leaderboard API', () => {
 
     // Verify the entry is now disabled in the database
     const entries = await query<{ disabled_at: string | null }>(
-      "SELECT disabled_at FROM leaderboard_entries WHERE leaderboard_id = $1 AND battlesnake_id = $2",
+      "SELECT disabled_at FROM leaderboard_registrations WHERE leaderboard_id = $1 AND battlesnake_id = $2",
       [leaderboardId, snakeId]
     );
     expect(entries.length).toBe(1);
@@ -504,8 +506,8 @@ test.describe('Country flags', () => {
       "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'",
     );
     const users = await query<{ user_id: string }>(
-      `INSERT INTO users (external_github_id, github_login, github_access_token, display_name, country)
-       VALUES ($1::bigint, $2, 'tk', 'Flag Owner GB', 'GB'), ($3::bigint, $4, 'tk', 'No Flag Owner', '')
+      `INSERT INTO users (external_github_id, github_login, display_name, country)
+       VALUES ($1::bigint, $2, 'Flag Owner GB', 'GB'), ($3::bigint, $4, 'No Flag Owner', '')
        RETURNING user_id`,
       [Date.now() * 1000 + 700_100, `flag-owner-gb-${stamp}`, Date.now() * 1000 + 700_101, `no-flag-owner-${stamp}`],
     );
@@ -522,10 +524,11 @@ test.describe('Country flags', () => {
           [user.user_id, name],
         );
         await query(
-          `INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, games_played, display_score)
-           VALUES ($1, $2, 10, $3)`,
+          `INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id, games_played, display_score)
+           VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2, 10, $3)`,
           [board.leaderboard_id, snake.battlesnake_id, score],
         );
+        await registerFixtureEntries();
       }
 
       await authenticatedPage.goto(`/leaderboards/${board.leaderboard_id}`);
@@ -544,6 +547,88 @@ test.describe('Country flags', () => {
       await query('DELETE FROM users WHERE user_id = ANY($1::uuid[])', [
         [gbOwner.user_id, plainOwner.user_id],
       ]);
+    }
+  });
+});
+
+test.describe('League seasons', () => {
+  test('season picker switches to a past season with frozen standings, leavers included', async ({ authenticatedPage }) => {
+    const stamp = `${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+    const [league] = await query<{ leaderboard_id: string }>(
+      "INSERT INTO leaderboards (name, game_type) VALUES ($1, 'Standard') RETURNING leaderboard_id",
+      [`Seasons LB ${stamp}`],
+    );
+    const leaderboardId = league.leaderboard_id;
+    const [owner] = await query<{ user_id: string }>(
+      `INSERT INTO users (external_github_id, github_login) VALUES ($1::bigint, $2) RETURNING user_id`,
+      [Date.now() * 1000 + 700_200, `season-owner-${stamp}`],
+    );
+    try {
+      // Preseason ends; a past "Autumn" season and a live "Winter" season follow.
+      await query(
+        `UPDATE leaderboard_seasons
+         SET starts_at = now() - interval '60 days', ends_at = now() - interval '30 days'
+         WHERE leaderboard_id = $1`,
+        [leaderboardId],
+      );
+      const [autumn] = await query<{ season_id: string }>(
+        `INSERT INTO leaderboard_seasons (leaderboard_id, name, starts_at, ends_at)
+         VALUES ($1, 'Autumn', now() - interval '30 days', now() - interval '1 day') RETURNING season_id`,
+        [leaderboardId],
+      );
+      const [winter] = await query<{ season_id: string }>(
+        `INSERT INTO leaderboard_seasons (leaderboard_id, name, starts_at)
+         VALUES ($1, 'Winter', now() - interval '1 day') RETURNING season_id`,
+        [leaderboardId],
+      );
+
+      const snakes: Record<string, string> = {};
+      for (const name of [`Stayer ${stamp}`, `Leaver ${stamp}`, `Winter Snake ${stamp}`]) {
+        const [snake] = await query<{ battlesnake_id: string }>(
+          `INSERT INTO battlesnakes (user_id, name, url, visibility)
+           VALUES ($1, $2, 'https://example.com', 'public') RETURNING battlesnake_id`,
+          [owner.user_id, name],
+        );
+        snakes[name] = snake.battlesnake_id;
+        await query(
+          `INSERT INTO leaderboard_registrations (leaderboard_id, battlesnake_id, disabled_at)
+           VALUES ($1, $2, $3)`,
+          [leaderboardId, snake.battlesnake_id, name.startsWith('Leaver') ? new Date() : null],
+        );
+      }
+      for (const [name, season, score] of [
+        [`Stayer ${stamp}`, autumn.season_id, 30],
+        [`Leaver ${stamp}`, autumn.season_id, 20],
+        [`Winter Snake ${stamp}`, winter.season_id, 25],
+      ] as const) {
+        await query(
+          `INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id, games_played, display_score)
+           VALUES ($1, $2, $3, 10, $4)`,
+          [leaderboardId, season, snakes[name], score],
+        );
+      }
+
+      await authenticatedPage.goto(`/leaderboards/${leaderboardId}`);
+      const picker = authenticatedPage.getByRole('navigation', { name: 'Seasons' });
+      await expect(picker.getByText('Preseason')).toBeVisible();
+      await expect(picker.getByRole('link', { name: 'Autumn' })).toBeVisible();
+      await expect(picker.locator('[aria-current="page"]')).toHaveText('Winter');
+
+      // Default: the live season's standings.
+      const rows = authenticatedPage.locator('tbody tr');
+      await expect(rows.filter({ hasText: `Winter Snake ${stamp}` })).toHaveCount(1);
+      await expect(rows.filter({ hasText: `Stayer ${stamp}` })).toHaveCount(0);
+
+      await picker.getByRole('link', { name: 'Autumn' }).click();
+      await expect(authenticatedPage).toHaveURL((url) => url.searchParams.get('season') === autumn.season_id);
+      await expect(picker.locator('[aria-current="page"]')).toHaveText('Autumn');
+      await expect(rows.filter({ hasText: `Stayer ${stamp}` })).toHaveCount(1);
+      await expect(rows.filter({ hasText: `Leaver ${stamp}` })).toHaveCount(1);
+      await expect(rows.filter({ hasText: `Winter Snake ${stamp}` })).toHaveCount(0);
+      await expect(authenticatedPage.getByText('This season has ended — see the live standings in')).toBeVisible();
+    } finally {
+      await query('DELETE FROM leaderboards WHERE leaderboard_id = $1', [leaderboardId]);
+      await query('DELETE FROM users WHERE user_id = $1', [owner.user_id]);
     }
   });
 });

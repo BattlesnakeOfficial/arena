@@ -648,14 +648,14 @@ async fn execute_call(builder: reqwest::RequestBuilder, timeout: Duration) -> Ca
                     latency_ms: Some(latency_ms),
                     summary: format!(
                         "Received HTTP {status} but failed to read the response body: {}",
-                        describe_request_error(&e)
+                        describe_request_error(e)
                     ),
                 },
             }
         }
         Ok(Err(e)) => CallOutcome::Failed {
             latency_ms: Some(start.elapsed().as_millis() as u64),
-            summary: describe_request_error(&e),
+            summary: describe_request_error(e),
         },
         Err(_) => CallOutcome::Failed {
             latency_ms: None,
@@ -668,7 +668,8 @@ async fn execute_call(builder: reqwest::RequestBuilder, timeout: Duration) -> Ca
 }
 
 /// Turn a reqwest error into a human-readable explanation.
-fn describe_request_error(e: &reqwest::Error) -> String {
+fn describe_request_error(e: reqwest::Error) -> String {
+    let e = e.without_url();
     if e.is_timeout() {
         "Timed out waiting for a response".to_string()
     } else if e.is_connect() {
@@ -847,6 +848,23 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
+    #[tokio::test]
+    async fn direct_probe_summary_omits_url_credentials() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let password = Uuid::new_v4();
+        let token = Uuid::new_v4();
+        let url = format!("http://u:{password}@127.0.0.1:{port}/?token={token}");
+        let outcome = execute_call(Client::new().get(url), Duration::from_secs(2)).await;
+        let CallOutcome::Failed { summary, .. } = outcome else {
+            panic!("expected refused connection");
+        };
+        assert!(summary.contains("Could not connect"), "{summary}");
+        assert!(!summary.contains(&password.to_string()), "{summary}");
+        assert!(!summary.contains(&token.to_string()), "{summary}");
+    }
+
     fn test_snake() -> Battlesnake {
         let now = chrono::Utc::now();
         Battlesnake {
@@ -861,6 +879,8 @@ mod tests {
             tail: "default".to_string(),
             created_at: now,
             updated_at: now,
+            retired_at: None,
+            allow_tournament_import: true,
         }
     }
 
@@ -990,7 +1010,7 @@ mod tests {
                 spec.game_type.clone(),
                 &[],
             );
-            assert_eq!(game.engine_game.meta.ruleset_name, real.meta.ruleset_name);
+            assert_eq!(game.engine_game.meta.mode, real.meta.mode);
             let (ours, theirs) = (&game.engine_game.meta.settings, &real.meta.settings);
             assert_eq!(ours.food_spawn_chance, theirs.food_spawn_chance);
             assert_eq!(ours.minimum_food, theirs.minimum_food);

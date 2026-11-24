@@ -1,0 +1,71 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT disabled_at IS NOT NULL AS \"disabled!\", disabled_reason,\n                      health_consecutive_failures, health_consecutive_successes,\n                      health_last_failure\n             FROM leaderboard_registrations WHERE leaderboard_registration_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "disabled!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "disabled_reason",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "disabled_reason"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "health_consecutive_failures",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "health_consecutive_failures"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "health_consecutive_successes",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "health_consecutive_successes"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "health_last_failure",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "health_last_failure"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "6917c7db9580019440a60a0bef12326978e0b3b38d0707d7fa631fdbfc676364"
+}

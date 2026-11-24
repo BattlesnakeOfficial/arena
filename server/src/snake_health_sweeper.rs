@@ -21,8 +21,8 @@
 //!
 //! Re-entrancy (cja jobs retry, and duplicate enqueues are routine): every
 //! step is a guarded update, and the emails are gated by the transitions in
-//! [`leaderboard_entry_health::deactivate`] and
-//! [`leaderboard_entry_health::reactivate`], which only one call can win, so
+//! [`leaderboard_registration::deactivate`] and
+//! [`leaderboard_registration::reactivate`], which only one call can win, so
 //! a retried sweep cannot create a second event for the same transition.
 
 use crate::notifications::{self, EmailRecipient, NewEmail, NewNotification, NotificationKind};
@@ -34,7 +34,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use crate::models::battlesnake::{Battlesnake, EngineRegion, Visibility};
-use crate::models::leaderboard_entry_health::{self, DISABLED_REASON_HEALTH};
+use crate::models::leaderboard_registration::{self, DISABLED_REASON_HEALTH};
 use crate::snake_client::ProxyClients;
 use crate::snake_health::{
     self, FailureMode, HEALTH_CHECK_TIMEOUT, HealthCallStatus, HealthCheckCall, TestGameSpec,
@@ -60,7 +60,7 @@ pub const EVIDENCE_WINDOW_HOURS: i32 = 2;
 
 /// An entry the sweep will probe.
 struct Candidate {
-    leaderboard_entry_id: Uuid,
+    leaderboard_registration_id: Uuid,
     /// Paused by the sweeper earlier: this is a recovery probe.
     paused: bool,
     spec: TestGameSpec,
@@ -110,8 +110,8 @@ async fn candidates(
 ) -> cja::Result<BTreeMap<Uuid, (Battlesnake, Vec<Candidate>)>> {
     let rows = sqlx::query!(
         r#"SELECT
-            le.leaderboard_entry_id,
-            le.disabled_at IS NOT NULL AS "paused!",
+            r.leaderboard_registration_id,
+            r.disabled_at IS NOT NULL AS "paused!",
             l.name AS leaderboard_name,
             l.game_type,
             l.board_size,
@@ -126,10 +126,18 @@ async fn candidates(
             b.head,
             b.tail,
             b.created_at,
-            b.updated_at
-         FROM leaderboard_entries le
-         JOIN leaderboards l ON l.leaderboard_id = le.leaderboard_id
-         JOIN battlesnakes b ON b.battlesnake_id = le.battlesnake_id
+            b.updated_at,
+            b.retired_at,
+            b.allow_tournament_import
+         FROM leaderboard_registrations r
+         JOIN leaderboards l ON l.leaderboard_id = r.leaderboard_id
+         JOIN battlesnakes b ON b.battlesnake_id = r.battlesnake_id
+         LEFT JOIN leaderboard_seasons s
+           ON s.leaderboard_id = r.leaderboard_id
+          AND s.starts_at <= clock_timestamp()
+          AND (s.ends_at IS NULL OR clock_timestamp() < s.ends_at)
+         LEFT JOIN leaderboard_entries le
+           ON le.season_id = s.season_id AND le.battlesnake_id = r.battlesnake_id
          CROSS JOIN LATERAL (
             SELECT COUNT(*) AS moves,
                    COUNT(*) FILTER (WHERE st.timed_out OR st.errored) AS bad
@@ -138,16 +146,17 @@ async fn candidates(
             WHERE gb.leaderboard_entry_id = le.leaderboard_entry_id
               AND gb.created_at > $1::timestamptz - make_interval(hours => $2)
               AND st.created_at <= $1::timestamptz
-              AND st.created_at > COALESCE(le.health_last_checked_at, '-infinity')
+              AND st.created_at > COALESCE(r.health_last_checked_at, '-infinity')
          ) evidence
          WHERE l.disabled_at IS NULL
            AND b.deleted_at IS NULL
+           AND b.retired_at IS NULL
            AND (
-             (le.disabled_at IS NOT NULL AND le.disabled_reason = $3)
+             (r.disabled_at IS NOT NULL AND r.disabled_reason = $3)
              OR (
-               le.disabled_at IS NULL
+               r.disabled_at IS NULL
                AND (
-                 le.health_consecutive_failures > 0
+                 r.health_consecutive_failures > 0
                  OR (evidence.bad > 0 AND evidence.bad * 100 >= evidence.moves * $4)
                )
              )
@@ -171,7 +180,7 @@ async fn candidates(
             row.match_size,
         )?;
         let candidate = Candidate {
-            leaderboard_entry_id: row.leaderboard_entry_id,
+            leaderboard_registration_id: row.leaderboard_registration_id,
             paused: row.paused,
             spec,
         };
@@ -191,6 +200,8 @@ async fn candidates(
                         tail: row.tail,
                         created_at: row.created_at,
                         updated_at: row.updated_at,
+                        retired_at: row.retired_at,
+                        allow_tournament_import: row.allow_tournament_import,
                     },
                     Vec::new(),
                 )
@@ -256,6 +267,20 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
                 continue;
             }
         };
+        let live = sqlx::query_scalar!(
+            "SELECT battlesnake_id FROM battlesnakes WHERE battlesnake_id = $1 AND deleted_at IS NULL AND retired_at IS NULL FOR SHARE",
+            snake.battlesnake_id
+        )
+        .fetch_optional(&mut *tx)
+        .await;
+        match live {
+            Ok(Some(_)) => {}
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::error!(battlesnake_id = %snake.battlesnake_id, error = format!("{error:#}"), "Failed to lock health sweep snake");
+                continue;
+            }
+        }
         let mut pulled = Vec::new();
         let mut resumed = Vec::new();
         let mut failed = false;
@@ -263,7 +288,7 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
             let calls = match calls {
                 Ok(calls) => calls,
                 Err(e) => {
-                    tracing::error!(battlesnake_id = %snake.battlesnake_id, leaderboard_entry_id = %candidate.leaderboard_entry_id, error = format!("{e:#}"), "Failed to probe snake health");
+                    tracing::error!(battlesnake_id = %snake.battlesnake_id, leaderboard_registration_id = %candidate.leaderboard_registration_id, error = format!("{e:#}"), "Failed to probe snake health");
                     continue;
                 }
             };
@@ -276,7 +301,7 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
                 Ok(Some(Transition::Resumed)) => resumed.push(candidate.spec.label.clone()),
                 Ok(None) => {}
                 Err(e) => {
-                    tracing::error!(battlesnake_id = %snake.battlesnake_id, leaderboard_entry_id = %candidate.leaderboard_entry_id, error = format!("{e:#}"), "Failed to record health sweep outcome");
+                    tracing::error!(battlesnake_id = %snake.battlesnake_id, leaderboard_registration_id = %candidate.leaderboard_registration_id, error = format!("{e:#}"), "Failed to record health sweep outcome");
                     failed = true;
                     break;
                 }
@@ -317,7 +342,7 @@ async fn record(
     if outcome.status == HealthCallStatus::ProxyFault {
         tracing::error!(
             battlesnake_id = %snake.battlesnake_id,
-            leaderboard_entry_id = %candidate.leaderboard_entry_id,
+            leaderboard_registration_id = %candidate.leaderboard_registration_id,
             region = snake.engine_region.as_str(),
             "Engine proxy fault during health sweep; preserving entry state"
         );
@@ -356,15 +381,16 @@ async fn apply_probe(
     outcome: &ProbeOutcome,
     sweep_started: DateTime<Utc>,
 ) -> cja::Result<Option<Transition>> {
-    let entry_id = candidate.leaderboard_entry_id;
+    let registration_id = candidate.leaderboard_registration_id;
     if outcome.status == HealthCallStatus::Healthy {
-        leaderboard_entry_health::record_success(connection, entry_id, sweep_started).await?;
+        leaderboard_registration::record_success(connection, registration_id, sweep_started)
+            .await?;
         return Ok(None);
     }
 
-    let Some(failures) = leaderboard_entry_health::record_failure(
+    let Some(failures) = leaderboard_registration::record_failure(
         connection,
-        entry_id,
+        registration_id,
         &outcome.failure_summary,
         sweep_started,
     )
@@ -377,13 +403,15 @@ async fn apply_probe(
     tracing::info!(
         battlesnake_id = %snake.battlesnake_id,
         snake_name = %snake.name,
+        failure = %outcome.failure_summary,
         leaderboard = %candidate.spec.label,
         consecutive_failures = failures,
         threshold,
-        failure = %outcome.failure_summary,
         "Snake failed health probe"
     );
-    if failures < threshold || !leaderboard_entry_health::deactivate(connection, entry_id).await? {
+    if failures < threshold
+        || !leaderboard_registration::deactivate(connection, registration_id).await?
+    {
         return Ok(None);
     }
 
@@ -407,11 +435,11 @@ async fn apply_recovery_probe(
     outcome: &ProbeOutcome,
     sweep_started: DateTime<Utc>,
 ) -> cja::Result<Option<Transition>> {
-    let entry_id = candidate.leaderboard_entry_id;
+    let registration_id = candidate.leaderboard_registration_id;
     if outcome.status != HealthCallStatus::Healthy {
-        leaderboard_entry_health::record_recovery_failure(
+        leaderboard_registration::record_recovery_failure(
             connection,
-            entry_id,
+            registration_id,
             &outcome.failure_summary,
             sweep_started,
         )
@@ -419,9 +447,12 @@ async fn apply_recovery_probe(
         return Ok(None);
     }
 
-    let Some(successes) =
-        leaderboard_entry_health::record_recovery_success(connection, entry_id, sweep_started)
-            .await?
+    let Some(successes) = leaderboard_registration::record_recovery_success(
+        connection,
+        registration_id,
+        sweep_started,
+    )
+    .await?
     else {
         // The owner resumed it meanwhile.
         return Ok(None);
@@ -435,7 +466,9 @@ async fn apply_recovery_probe(
         threshold,
         "Paused snake passed recovery probe"
     );
-    if successes < threshold || !leaderboard_entry_health::reactivate(connection, entry_id).await? {
+    if successes < threshold
+        || !leaderboard_registration::reactivate(connection, registration_id).await?
+    {
         return Ok(None);
     }
 
@@ -548,8 +581,8 @@ mod tests {
     impl Seed {
         async fn new(pool: &PgPool, url: &str) -> cja::Result<Self> {
             let user_id = sqlx::query_scalar!(
-                "INSERT INTO users (external_github_id, github_login, github_access_token)
-                 VALUES (77001, 'sweep-owner', 'test-token')
+                "INSERT INTO users (external_github_id, github_login)
+                 VALUES (77001, 'sweep-owner')
                  RETURNING user_id",
             )
             .fetch_one(pool)
@@ -587,6 +620,7 @@ mod tests {
                 self.snake_id,
             )
             .await?
+            .expect("live snake joins")
             .leaderboard_entry_id)
         }
 
@@ -660,10 +694,13 @@ mod tests {
 
     async fn health(pool: &PgPool, entry_id: Uuid) -> cja::Result<Health> {
         let row = sqlx::query!(
-            r#"SELECT disabled_at IS NOT NULL AS "disabled!", disabled_reason,
-                      health_consecutive_failures, health_consecutive_successes,
-                      health_last_failure, health_last_checked_at
-             FROM leaderboard_entries WHERE leaderboard_entry_id = $1"#,
+            r#"SELECT r.disabled_at IS NOT NULL AS "disabled!", r.disabled_reason,
+                      r.health_consecutive_failures, r.health_consecutive_successes,
+                      r.health_last_failure, r.health_last_checked_at
+             FROM leaderboard_registrations r
+             JOIN leaderboard_entries le
+               ON le.leaderboard_id = r.leaderboard_id AND le.battlesnake_id = r.battlesnake_id
+             WHERE le.leaderboard_entry_id = $1"#,
             entry_id,
         )
         .fetch_one(pool)
@@ -678,11 +715,11 @@ mod tests {
         })
     }
 
-    /// Simulate a real sweep interval passing: push every entry's last check
+    /// Simulate a real sweep interval passing: push every registration's last check
     /// past the probe-count spacing gate.
     async fn age_checks(pool: &PgPool) -> cja::Result<()> {
         sqlx::query!(
-            "UPDATE leaderboard_entries
+            "UPDATE leaderboard_registrations
              SET health_last_checked_at = health_last_checked_at - INTERVAL '31 minutes'"
         )
         .execute(pool)
@@ -690,16 +727,34 @@ mod tests {
         Ok(())
     }
 
+    /// The registration behind a test entry (the health state's home).
+    async fn registration_of(pool: &PgPool, entry_id: Uuid) -> cja::Result<Uuid> {
+        Ok(sqlx::query_scalar!(
+            "SELECT r.leaderboard_registration_id
+             FROM leaderboard_entries le
+             JOIN leaderboard_registrations r
+               ON r.leaderboard_id = le.leaderboard_id AND r.battlesnake_id = le.battlesnake_id
+             WHERE le.leaderboard_entry_id = $1",
+            entry_id
+        )
+        .fetch_one(pool)
+        .await?)
+    }
+
     async fn pause(pool: &PgPool, entry_id: Uuid) -> cja::Result<()> {
-        let failed = leaderboard_entry_health::record_failure(
+        let registration_id = registration_of(pool, entry_id).await?;
+        let failed = leaderboard_registration::record_failure(
             &mut *pool.acquire().await?,
-            entry_id,
+            registration_id,
             "was down",
             Utc::now(),
         )
         .await?;
         assert_eq!(failed, Some(1));
-        assert!(leaderboard_entry_health::deactivate(&mut *pool.acquire().await?, entry_id).await?);
+        assert!(
+            leaderboard_registration::deactivate(&mut *pool.acquire().await?, registration_id)
+                .await?
+        );
         Ok(())
     }
 
@@ -728,6 +783,108 @@ mod tests {
             .mount(&server)
             .await;
         server
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn failed_probe_logs_snake_name_and_failure(pool: PgPool) -> cja::Result<()> {
+        let capture = crate::test_capture::Capture::shared();
+        let name = Uuid::new_v4().to_string();
+        let failure = Uuid::new_v4().to_string();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/move"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(format!(r#"{{"move":"{failure}"}}"#)),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let seed = Seed::new(&pool, &server.uri()).await?;
+        sqlx::query!(
+            "UPDATE battlesnakes SET name = $1 WHERE battlesnake_id = $2",
+            name,
+            seed.snake_id
+        )
+        .execute(&pool)
+        .await?;
+        let entry = seed.join("Standard", "Standard", 4).await?;
+        seed.broken_games(entry).await?;
+        let mut app_state = AppState::test_from_pool(pool.clone());
+        let mut config = (*app_state.config).clone();
+        config.snake_health_failure_threshold = 1;
+        app_state.config = std::sync::Arc::new(config);
+        run_sweep(&app_state).await?;
+        let lines = capture.log_lines();
+        for message in [
+            "Snake failed health probe",
+            "Pulled snake from leaderboard matchmaking",
+        ] {
+            let line = lines
+                .iter()
+                .find(|line| {
+                    line.get("message").map(String::as_str) == Some(message)
+                        && line.get("battlesnake_id") == Some(&seed.snake_id.to_string())
+                })
+                .expect("sweeper event");
+            assert_eq!(line.get("snake_name"), Some(&name), "{line:?}");
+            if message == "Snake failed health probe" {
+                assert!(
+                    line.get("failure")
+                        .is_some_and(|value| value.contains(&failure)),
+                    "{line:?}"
+                );
+            }
+        }
+        let state = health(&pool, entry).await?;
+        assert!(state.disabled);
+        assert!(
+            state
+                .last_failure
+                .is_some_and(|value| value.contains(&failure))
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn recovery_probe_logs_snake_name(pool: PgPool) -> cja::Result<()> {
+        let capture = crate::test_capture::Capture::shared();
+        let server = healthy_snake_server().await;
+        let seed = Seed::new(&pool, &server.uri()).await?;
+        let name = Uuid::new_v4().to_string();
+        sqlx::query!(
+            "UPDATE battlesnakes SET name = $1 WHERE battlesnake_id = $2",
+            name,
+            seed.snake_id
+        )
+        .execute(&pool)
+        .await?;
+        let entry = seed.join("Standard", "Standard", 4).await?;
+        pause(&pool, entry).await?;
+        age_checks(&pool).await?;
+        let mut app_state = AppState::test_from_pool(pool.clone());
+        let mut config = (*app_state.config).clone();
+        config.snake_health_recovery_threshold = 1;
+        app_state.config = std::sync::Arc::new(config);
+        run_sweep(&app_state).await?;
+        let lines = capture.log_lines();
+        for message in [
+            "Paused snake passed recovery probe",
+            "Put recovered snake back into leaderboard matchmaking",
+        ] {
+            let line = lines
+                .iter()
+                .find(|line| {
+                    line.get("message").map(String::as_str) == Some(message)
+                        && line.get("battlesnake_id") == Some(&seed.snake_id.to_string())
+                })
+                .expect("sweeper event");
+            assert_eq!(line.get("snake_name"), Some(&name), "{line:?}");
+        }
+        assert!(!health(&pool, entry).await?.disabled);
+        Ok(())
     }
 
     #[sqlx::test(migrations = "../migrations")]
@@ -805,8 +962,8 @@ mod tests {
         let entry = seed.join("Standard", "Standard", 4).await?;
         seed.game(entry, 30, 20, 0, Bad::TimedOut).await?;
         sqlx::query!(
-            "UPDATE leaderboard_entries SET health_last_checked_at = NOW() - INTERVAL '10 minutes'
-             WHERE leaderboard_entry_id = $1",
+            "UPDATE leaderboard_registrations r SET health_last_checked_at = NOW() - INTERVAL '10 minutes'
+             FROM leaderboard_entries le WHERE le.leaderboard_entry_id = $1 AND r.leaderboard_id = le.leaderboard_id AND r.battlesnake_id = le.battlesnake_id",
             entry
         )
         .execute(&pool)
@@ -907,7 +1064,7 @@ mod tests {
         first.broken_games(first_a).await?;
         first.broken_games(first_z).await?;
 
-        let second_user: Uuid = sqlx::query_scalar("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (77002, 'second-sweep-owner', 'test-token') RETURNING user_id")
+        let second_user: Uuid = sqlx::query_scalar("INSERT INTO users (external_github_id, github_login) VALUES (77002, 'second-sweep-owner') RETURNING user_id")
             .fetch_one(&pool).await?;
         let second_snake: Uuid = sqlx::query_scalar("INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'second-sweep-snake', $2) RETURNING battlesnake_id")
             .bind(second_user).bind(server.uri()).fetch_one(&pool).await?;
@@ -918,10 +1075,11 @@ mod tests {
         let good_entry = second.join("Other Snake", "Standard", 4).await?;
         second.broken_games(good_entry).await?;
 
-        // The first entry's update is valid, but the next entry aborts its
+        // The first registration's update is valid, but the next aborts its
         // entire snake transaction. The independent snake must still commit.
         // DDL cannot take parameters; the UUID was generated by the DB.
-        sqlx::query(&format!("ALTER TABLE leaderboard_entries ADD CONSTRAINT reject_one_health_entry CHECK (leaderboard_entry_id <> '{first_z}'::uuid OR health_consecutive_failures = 0)"))
+        let first_z_registration = registration_of(&pool, first_z).await?;
+        sqlx::query(sqlx::AssertSqlSafe(format!("ALTER TABLE leaderboard_registrations ADD CONSTRAINT reject_one_health_registration CHECK (leaderboard_registration_id <> '{first_z_registration}'::uuid OR health_consecutive_failures = 0)")))
             .execute(&pool).await?;
         let mut state = AppState::test_from_pool(pool.clone());
         let mut config = (*state.config).clone();
@@ -994,7 +1152,7 @@ mod tests {
         );
         let mut connection = pool.acquire().await?;
         assert_eq!(
-            leaderboard_entry_health::owner_notification_email(&mut connection, seed.snake_id)
+            leaderboard_registration::owner_notification_email(&mut connection, seed.snake_id)
                 .await?,
             None
         );
@@ -1092,9 +1250,9 @@ mod tests {
         pause(&pool, entry).await?;
         age_checks(&pool).await?;
         assert_eq!(
-            leaderboard_entry_health::record_recovery_success(
+            leaderboard_registration::record_recovery_success(
                 &mut *pool.acquire().await?,
-                entry,
+                registration_of(&pool, entry).await?,
                 Utc::now()
             )
             .await?,
@@ -1111,6 +1269,70 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../migrations")]
+    async fn retirement_during_probe_preserves_health_pause_and_sends_no_notice(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        use crate::models::battlesnake::{
+            self, RetireBattlesnakeOutcome, UnretireBattlesnakeOutcome,
+        };
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"move":"up"}"#)
+                    .set_delay(std::time::Duration::from_secs(2)),
+            )
+            .mount(&server)
+            .await;
+        let seed = Seed::new(&pool, &server.uri()).await?;
+        let entry = seed
+            .join("Recovery After Retirement", "Standard", 4)
+            .await?;
+        pause(&pool, entry).await?;
+        age_checks(&pool).await?;
+        let owner: Uuid =
+            sqlx::query_scalar("SELECT user_id FROM battlesnakes WHERE battlesnake_id = $1")
+                .bind(seed.snake_id)
+                .fetch_one(&pool)
+                .await?;
+        let mut state = AppState::test_from_pool(pool.clone());
+        let mut config = (*state.config).clone();
+        config.snake_health_recovery_threshold = 1;
+        state.config = std::sync::Arc::new(config);
+        let sweep = tokio::spawn(async move { run_sweep(&state).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while requests(&server).await == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await?;
+        assert_eq!(
+            battlesnake::retire_battlesnake(&pool, seed.snake_id, owner).await?,
+            RetireBattlesnakeOutcome::Retired {
+                withdrawn_registrations: 0
+            }
+        );
+        sweep.await??;
+        let paused = health(&pool, entry).await?;
+        assert!(paused.disabled);
+        assert_eq!(paused.reason.as_deref(), Some("health"));
+        assert_eq!(paused.successes, 0);
+        let notices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notifications")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(notices, 0);
+        assert_eq!(
+            battlesnake::unretire_battlesnake(&pool, seed.snake_id, owner).await?,
+            UnretireBattlesnakeOutcome::Unretired
+        );
+        assert_eq!(
+            health(&pool, entry).await?.reason.as_deref(),
+            Some("health")
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
     async fn retired_boards_and_manual_pauses_are_never_probed(pool: PgPool) -> cja::Result<()> {
         let server = broken_snake_server().await;
         let seed = Seed::new(&pool, &server.uri()).await?;
@@ -1121,7 +1343,19 @@ mod tests {
         sqlx::query!("UPDATE leaderboards SET disabled_at = NOW() WHERE name = 'Retired'")
             .execute(&pool)
             .await?;
-        crate::models::leaderboard::set_disabled(&pool, paused, Some(Utc::now())).await?;
+        let paused_league = sqlx::query_scalar!(
+            "SELECT leaderboard_id FROM leaderboard_entries WHERE leaderboard_entry_id = $1",
+            paused
+        )
+        .fetch_one(&pool)
+        .await?;
+        leaderboard_registration::set_registration_disabled(
+            &pool,
+            paused_league,
+            seed.snake_id,
+            Some(Utc::now()),
+        )
+        .await?;
 
         run_sweep(&AppState::test_from_pool(pool.clone())).await?;
 

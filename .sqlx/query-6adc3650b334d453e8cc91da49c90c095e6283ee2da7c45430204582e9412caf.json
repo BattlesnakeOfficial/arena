@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.session_id FROM sessions s\n                     JOIN users u ON u.user_id = s.user_id\n                     WHERE u.external_github_id = $1\n                     ORDER BY s.created_at DESC\n                     LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "session_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6adc3650b334d453e8cc91da49c90c095e6283ee2da7c45430204582e9412caf"
+}

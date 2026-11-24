@@ -18,7 +18,7 @@ use uuid::Uuid;
 // Move-response reading lives in engine-core (shared with the battlesnake
 // CLI); re-exported so every existing consumer path keeps compiling.
 pub use engine_core::move_response::{
-    BODY_READ_CAP_BYTES, MoveResponse, MoveResult, parse_direction,
+    BODY_READ_CAP_BYTES, MoveOutcome, MoveResponse, MoveResult, parse_direction,
 };
 // Shared HTTP-boundary helpers, also moved to engine-core for the CLI's
 // `play`. `accumulate_body_chunk` is not re-exported: its tests moved with
@@ -42,6 +42,27 @@ pub const USER_AGENT: &str = concat!("BattlesnakeArena/", env!("VERGEN_GIT_SHA")
 /// Builder for every client that talks to snakes, so they all identify as Arena.
 pub fn client_builder() -> reqwest::ClientBuilder {
     Client::builder().user_agent(USER_AGENT)
+}
+
+/// Logged in place of a snake URL that has no `scheme://host` form.
+const UNLOGGABLE_URL: &str = "[unparsable url]";
+
+/// A snake URL as `scheme://host[:port]/path` for logs. Snake URLs are
+/// user-supplied and can carry credentials in the userinfo, query or
+/// fragment, and logs reach PostHog. Input that does not parse, or has no
+/// host, logs as a fixed placeholder, never the raw string. Log a reqwest
+/// error from a snake call as `e.without_url()`: its Display prints the URL.
+pub(crate) fn log_safe_url(raw: &str) -> String {
+    let Ok(url) = url::Url::parse(raw) else {
+        return UNLOGGABLE_URL.to_owned();
+    };
+    let Some(host) = url.host_str() else {
+        return UNLOGGABLE_URL.to_owned();
+    };
+    match url.port() {
+        Some(port) => format!("{}://{host}:{port}{}", url.scheme(), url.path()),
+        None => format!("{}://{host}{}", url.scheme(), url.path()),
+    }
 }
 
 #[derive(Clone)]
@@ -247,14 +268,23 @@ pub async fn request_move(
 
     let start = Instant::now();
 
-    let result =
-        tokio::time::timeout(timeout, client.post(&move_url).json(&request_body).send()).await;
+    // One budget for send AND body read, like the CLI's `round_trip`: a
+    // body that stalls past the move timeout is a real timeout, not an
+    // unusable 200. Latency is measured at body completion (or the
+    // deadline firing).
+    let result = tokio::time::timeout(timeout, async {
+        let response = client.post(&move_url).json(&request_body).send().await?;
+        let status = response.status().as_u16();
+        let body = read_body_capped(response, BODY_READ_CAP_BYTES).await;
+        Ok::<_, reqwest::Error>((status, body))
+    })
+    .await;
 
     let elapsed = start.elapsed().as_millis() as i64;
 
     // `tokio::time::timeout` checks the inner future before its deadline, so
-    // a completed send that still exceeds the budget means this task was
-    // polled late: an arena-side stall, not a slow snake.
+    // a completed send+body that still exceeds the budget means this task
+    // was polled late: an arena-side stall, not a slow snake.
     if result.is_ok() && elapsed > timeout.as_millis() as i64 {
         tracing::warn!(
             metric_type = "late_poll",
@@ -266,34 +296,36 @@ pub async fn request_move(
     }
 
     match result {
-        Ok(Ok(response)) => {
-            let status = Some(response.status().as_u16());
-            match read_body_capped(response, BODY_READ_CAP_BYTES).await {
-                Ok(body) => match engine_core::move_response::interpret_move_response(
-                    snake_id,
-                    &body,
-                    status,
-                    Some(elapsed),
-                    last_direction,
-                ) {
-                    Ok(result) => result,
-                    Err(e) => invalid_move_response(snake_id, last_direction, elapsed, status, &e),
-                },
+        Ok(Ok((status, Ok(body)))) => {
+            match engine_core::move_response::interpret_move_response(
+                snake_id,
+                &body,
+                status,
+                Some(elapsed),
+                last_direction,
+            ) {
+                Ok(result) => result,
                 Err(e) => invalid_move_response(snake_id, last_direction, elapsed, status, &e),
             }
+        }
+        // Headers arrived but the body read failed inside the budget (e.g.
+        // a mid-body reset): an unusable answer, not a transport fault.
+        Ok(Ok((status, Err(e)))) => {
+            invalid_move_response(snake_id, last_direction, elapsed, status, &e.without_url())
         }
         Ok(Err(e)) => {
             // Network error - continue in same direction
             tracing::warn!(
                 snake_id = %snake_id,
-                error = %e,
+                url = %log_safe_url(&move_url),
+                error = %e.without_url(),
                 "Network error calling snake, using fallback"
             );
             engine_core::move_response::transport_fallback_result(
                 snake_id,
                 last_direction,
                 None,
-                true,
+                MoveOutcome::Transport,
             )
         }
         Err(_) => {
@@ -306,8 +338,8 @@ pub async fn request_move(
             engine_core::move_response::transport_fallback_result(
                 snake_id,
                 last_direction,
-                None,
-                true,
+                Some(elapsed),
+                MoveOutcome::TimedOut,
             )
         }
     }
@@ -317,7 +349,7 @@ fn invalid_move_response(
     snake_id: &str,
     last_direction: Option<Direction>,
     elapsed: i64,
-    status_code: Option<u16>,
+    status_code: u16,
     error: &dyn std::fmt::Display,
 ) -> MoveResult {
     tracing::warn!(
@@ -352,7 +384,12 @@ pub async fn request_start(
             tracing::debug!(snake_id = %snake_id, "Called /start successfully");
         }
         Ok(Err(e)) => {
-            tracing::warn!(snake_id = %snake_id, error = %e, "Failed to call /start");
+            tracing::warn!(
+                snake_id = %snake_id,
+                url = %log_safe_url(&start_url),
+                error = %e.without_url(),
+                "Failed to call /start"
+            );
         }
         Err(_) => {
             tracing::warn!(snake_id = %snake_id, "Timeout calling /start");
@@ -379,7 +416,12 @@ pub async fn request_end(
             tracing::debug!(snake_id = %snake_id, "Called /end successfully");
         }
         Ok(Err(e)) => {
-            tracing::warn!(snake_id = %snake_id, error = %e, "Failed to call /end");
+            tracing::warn!(
+                snake_id = %snake_id,
+                url = %log_safe_url(&end_url),
+                error = %e.without_url(),
+                "Failed to call /end"
+            );
         }
         Err(_) => {
             tracing::warn!(snake_id = %snake_id, "Timeout calling /end");
@@ -389,29 +431,55 @@ pub async fn request_end(
 
 pub async fn request_info(
     client: &Client,
-    url: &str,
+    endpoint: &SnakeEndpoint,
     timeout: Duration,
 ) -> Option<SnakeInfoResponse> {
-    match tokio::time::timeout(timeout, client.get(url).send()).await {
+    let snake_id = endpoint.snake_id.as_str();
+    let battlesnake_id = endpoint.battlesnake_id;
+    let url = log_safe_url(&endpoint.url);
+    match tokio::time::timeout(timeout, client.get(&endpoint.url).send()).await {
         Ok(Ok(response)) => match read_body_capped(response, BODY_READ_CAP_BYTES).await {
             Ok(body) => match serde_json::from_str::<SnakeInfoResponse>(&body) {
                 Ok(info) => Some(info),
                 Err(e) => {
-                    tracing::warn!(url = %url, error = %e, "Failed to parse snake info response");
+                    tracing::warn!(
+                        snake_id,
+                        %battlesnake_id,
+                        %url,
+                        error = %e,
+                        "Failed to parse snake info response"
+                    );
                     None
                 }
             },
             Err(e) => {
-                tracing::warn!(url = %url, error = %e, "Failed to parse snake info response");
+                tracing::warn!(
+                    snake_id,
+                    %battlesnake_id,
+                    %url,
+                    error = %e.without_url(),
+                    "Failed to parse snake info response"
+                );
                 None
             }
         },
         Ok(Err(e)) => {
-            tracing::warn!(url = %url, error = %e, "Network error fetching snake info");
+            tracing::warn!(
+                snake_id,
+                %battlesnake_id,
+                %url,
+                error = %e.without_url(),
+                "Network error fetching snake info"
+            );
             None
         }
         Err(_) => {
-            tracing::warn!(url = %url, "Timeout fetching snake info");
+            tracing::warn!(
+                snake_id,
+                %battlesnake_id,
+                %url,
+                "Timeout fetching snake info"
+            );
             None
         }
     }
@@ -448,14 +516,11 @@ async fn retry_move_direct(
 /// (no answer arrived in budget); `snake_error` is a non-2xx answer;
 /// `invalid_response` is a 2xx answer whose body/direction was unusable.
 fn retry_outcome(result: &MoveResult) -> &'static str {
-    if result.timed_out {
-        "snake_timeout"
-    } else if result.status_code.is_some_and(|s| !(200..300).contains(&s)) {
-        "snake_error"
-    } else if result.errored {
-        "invalid_response"
-    } else {
-        "moved"
+    match result.outcome {
+        MoveOutcome::TimedOut | MoveOutcome::Transport => "snake_timeout",
+        MoveOutcome::HttpError { .. } => "snake_error",
+        MoveOutcome::Invalid { .. } => "invalid_response",
+        MoveOutcome::Ok { .. } => "moved",
     }
 }
 
@@ -514,12 +579,12 @@ pub async fn request_move_routed(
         .await;
     };
     let body = build_request_for_snake(game, &endpoint.snake_id, snake_contexts, customizations);
-    let fallback = |latency_ms, timed_out| {
+    let fallback = |latency_ms, outcome| {
         engine_core::move_response::transport_fallback_result(
             &endpoint.snake_id,
             last_direction,
             latency_ms,
-            timed_out,
+            outcome,
         )
     };
     match execute_proxy(builder.json(&body), timeout).await {
@@ -530,7 +595,7 @@ pub async fn request_move_routed(
         } => match engine_core::move_response::interpret_move_response(
             &endpoint.snake_id,
             &body,
-            Some(status.as_u16()),
+            status.as_u16(),
             Some(latency_ms),
             last_direction,
         ) {
@@ -539,7 +604,7 @@ pub async fn request_move_routed(
                 &endpoint.snake_id,
                 last_direction,
                 latency_ms,
-                Some(status.as_u16()),
+                status.as_u16(),
                 &error,
             ),
         },
@@ -563,7 +628,14 @@ pub async fn request_move_routed(
                     "Network error calling snake, using fallback"
                 );
             }
-            fallback(None, true)
+            fallback(
+                None,
+                if timed_out {
+                    MoveOutcome::TimedOut
+                } else {
+                    MoveOutcome::Transport
+                },
+            )
         }
         ProxyCall::Response {
             class: ProxyResponseClass::ProxyFault,
@@ -748,7 +820,7 @@ pub async fn request_info_routed(
         timeout,
     );
     let SnakeRequestRoute::Proxied(builder) = route else {
-        return request_info(clients.direct, &endpoint.url, timeout).await;
+        return request_info(clients.direct, endpoint, timeout).await;
     };
     match execute_proxy(builder, timeout).await {
         ProxyCall::Response {
@@ -759,7 +831,9 @@ pub async fn request_info_routed(
             Ok(info) => Some(info),
             Err(error) => {
                 tracing::warn!(
-                    url = %endpoint.url,
+                    snake_id = %endpoint.snake_id,
+                    battlesnake_id = %endpoint.battlesnake_id,
+                    url = %log_safe_url(&endpoint.url),
                     region = endpoint.engine_region.as_str(),
                     %error,
                     "Failed to parse snake info response"
@@ -773,7 +847,7 @@ pub async fn request_info_routed(
             ..
         } if status == StatusCode::PROXY_AUTHENTICATION_REQUIRED => {
             log_proxy_auth_failure(endpoint.engine_region);
-            request_info(clients.direct, &endpoint.url, timeout).await
+            request_info(clients.direct, endpoint, timeout).await
         }
         ProxyCall::Response {
             class: ProxyResponseClass::ProxyFault,
@@ -806,13 +880,17 @@ pub async fn request_info_routed(
         } => {
             if timed_out {
                 tracing::warn!(
-                    url = %endpoint.url,
+                    snake_id = %endpoint.snake_id,
+                    battlesnake_id = %endpoint.battlesnake_id,
+                    url = %log_safe_url(&endpoint.url),
                     region = endpoint.engine_region.as_str(),
                     "Timeout fetching snake info"
                 );
             } else {
                 tracing::warn!(
-                    url = %endpoint.url,
+                    snake_id = %endpoint.snake_id,
+                    battlesnake_id = %endpoint.battlesnake_id,
+                    url = %log_safe_url(&endpoint.url),
                     region = endpoint.engine_region.as_str(),
                     %status,
                     "Network error fetching snake info"
@@ -924,7 +1002,7 @@ mod tests {
     use super::*;
     use crate::wire;
     use proptest::prelude::*;
-    use tokio::io::AsyncWriteExt as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use wiremock::matchers::{header, method, path};
 
     #[test]
@@ -958,30 +1036,25 @@ mod tests {
 
     #[test]
     fn retry_outcome_covers_all_four_outcomes_and_precedence() {
-        let result = |timed_out: bool, status_code: Option<u16>, errored: bool| MoveResult {
+        let result = |outcome: MoveOutcome| MoveResult {
             snake_id: "snake-1".to_string(),
             direction: Direction::Right,
             latency_ms: Some(120),
-            timed_out,
             shout: None,
-            status_code,
-            errored,
+            outcome,
         };
-        // (timed_out, status_code, errored) -> expected outcome.
-        // Rows 2-3 pin the precedence: `timed_out` outranks a non-2xx
-        // status, and a non-2xx status outranks `errored`.
         let cases = [
-            ((true, None, false), "snake_timeout"),
-            ((true, Some(504), true), "snake_timeout"),
-            ((false, Some(500), true), "snake_error"),
-            ((false, Some(200), true), "invalid_response"),
-            ((false, Some(200), false), "moved"),
+            (MoveOutcome::TimedOut, "snake_timeout"),
+            (MoveOutcome::Transport, "snake_timeout"),
+            (MoveOutcome::HttpError { status_code: 500 }, "snake_error"),
+            (
+                MoveOutcome::Invalid { status_code: 200 },
+                "invalid_response",
+            ),
+            (MoveOutcome::Ok { status_code: 200 }, "moved"),
         ];
-        for ((timed_out, status_code, errored), expected) in cases {
-            assert_eq!(
-                retry_outcome(&result(timed_out, status_code, errored)),
-                expected
-            );
+        for (outcome, expected) in cases {
+            assert_eq!(retry_outcome(&result(outcome)), expected);
         }
     }
 
@@ -1035,8 +1108,8 @@ mod tests {
         .await;
         assert_eq!(result.direction, Direction::Right);
         assert_eq!(result.latency_ms, Some(28));
-        assert!(!result.timed_out);
-        assert!(!result.errored);
+        assert!(!result.outcome.timed_out());
+        assert!(!result.outcome.errored());
     }
 
     #[tokio::test]
@@ -1100,10 +1173,10 @@ mod tests {
             )
             .await;
             assert_eq!(result.direction, direction);
-            assert_eq!(result.timed_out, timed_out);
+            assert_eq!(result.outcome.timed_out(), timed_out);
             // Transport failures are timeouts, and the 407 retry reached a
             // healthy snake: neither is an unusable answer.
-            assert!(!result.errored);
+            assert!(!result.outcome.errored());
             if status != 407 {
                 assert_eq!(result.latency_ms, latency);
             }
@@ -1155,9 +1228,14 @@ mod tests {
             .await;
             assert_eq!(result.direction, Direction::Down);
             assert_eq!(result.latency_ms, Some(41));
-            assert!(!result.timed_out);
+            assert!(!result.outcome.timed_out());
             // The move is still used, but a non-2xx answer is the snake erroring.
-            assert!(result.errored);
+            assert_eq!(
+                result.outcome,
+                MoveOutcome::HttpError {
+                    status_code: status
+                }
+            );
         }
     }
 
@@ -1268,8 +1346,11 @@ mod tests {
         // assert is ~3x that budget for slow hosts.
         assert!(start.elapsed() < Duration::from_secs(2));
         assert_eq!(result.direction, Direction::Right);
-        assert!(!result.timed_out);
-        assert!(!result.errored, "a proxy fault is never the snake's error");
+        assert!(!result.outcome.timed_out());
+        assert!(
+            !result.outcome.errored(),
+            "a proxy fault is never the snake's error"
+        );
         // The latency is measured on the direct call (wiremock's delay is a
         // floor, so the reply cannot arrive before 120ms); the proxy never
         // sent one. A lower bound also proves the fresh-timeout retry: a
@@ -1330,7 +1411,7 @@ mod tests {
         .await;
         assert_eq!(result.direction, Direction::Up);
         assert_eq!(result.latency_ms, Some(450));
-        assert!(!result.timed_out);
+        assert!(!result.outcome.timed_out());
     }
 
     #[tokio::test]
@@ -1422,8 +1503,11 @@ mod tests {
         // assert is ~3x that budget for slow hosts.
         assert!(started.elapsed() < Duration::from_millis(1500));
         assert_eq!(result.direction, Direction::Right);
-        assert!(!result.timed_out);
-        assert!(!result.errored, "a proxy fault is never the snake's error");
+        assert!(!result.outcome.timed_out());
+        assert!(
+            !result.outcome.errored(),
+            "a proxy fault is never the snake's error"
+        );
         let latency = result
             .latency_ms
             .expect("direct retry reports measured latency");
@@ -1544,8 +1628,8 @@ mod tests {
         )
         .await;
         assert_eq!(result.direction, Direction::Right);
-        assert!(!result.timed_out);
-        assert!(!result.errored);
+        assert!(!result.outcome.timed_out());
+        assert!(!result.outcome.errored());
         assert!(result.latency_ms.is_some());
     }
 
@@ -1598,8 +1682,8 @@ mod tests {
         )
         .await;
         assert_eq!(result.direction, Direction::Right);
-        assert!(!result.timed_out);
-        assert!(!result.errored);
+        assert!(!result.outcome.timed_out());
+        assert!(!result.outcome.errored());
         assert!(result.latency_ms.is_some());
     }
 
@@ -1658,9 +1742,18 @@ mod tests {
             )
             .await;
             assert_eq!(result.direction, Direction::Left, "status {status}");
-            assert!(result.timed_out, "status {status}");
+            assert!(result.outcome.timed_out(), "status {status}");
+            assert_eq!(
+                result.outcome,
+                if status == 504 {
+                    MoveOutcome::TimedOut
+                } else {
+                    MoveOutcome::Transport
+                },
+                "status {status}"
+            );
             assert_eq!(result.latency_ms, None, "status {status}");
-            assert!(!result.errored, "status {status}");
+            assert!(!result.outcome.errored(), "status {status}");
         }
     }
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1678,9 +1771,227 @@ mod tests {
             .mount(&server)
             .await;
 
-        let result = request_info(&Client::new(), &server.uri(), Duration::from_secs(2)).await;
+        let snake = test_endpoint("snake-1", server.uri(), EngineRegion::UsWest1);
+        let result = request_info(&Client::new(), &snake, Duration::from_secs(2)).await;
 
         assert!(result.is_none());
+    }
+
+    fn test_endpoint(snake_id: &str, url: String, engine_region: EngineRegion) -> SnakeEndpoint {
+        SnakeEndpoint {
+            snake_id: snake_id.to_string(),
+            url,
+            engine_region,
+            battlesnake_id: uuid::Uuid::new_v4(),
+            user_id: uuid::Uuid::new_v4(),
+        }
+    }
+
+    #[test]
+    fn log_safe_url_keeps_scheme_host_port_and_path_only() {
+        for (raw, expected) in [
+            (
+                "https://user:pass@snake.example.com:8443/api/v1?token=secret#frag",
+                "https://snake.example.com:8443/api/v1",
+            ),
+            (
+                "http://user@snake.example.com/",
+                "http://snake.example.com/",
+            ),
+            (
+                "https://snake.example.com?key=secret",
+                "https://snake.example.com/",
+            ),
+            (
+                "https://snake.example.com/x#frag",
+                "https://snake.example.com/x",
+            ),
+            (
+                "https://snake.example.com:443/x",
+                "https://snake.example.com/x",
+            ),
+            ("http://[::1]:8000/snake", "http://[::1]:8000/snake"),
+            ("http://127.0.0.1:8000", "http://127.0.0.1:8000/"),
+            ("not a url?token=secret", UNLOGGABLE_URL),
+            ("localhost:8000?token=secret", UNLOGGABLE_URL),
+            ("mailto:someone@example.com", UNLOGGABLE_URL),
+            ("http://exa mple.com/?token=secret", UNLOGGABLE_URL),
+            ("", UNLOGGABLE_URL),
+        ] {
+            assert_eq!(log_safe_url(raw), expected, "{raw}");
+        }
+    }
+
+    /// Drives every snake-URL warn with a URL that carries credentials in
+    /// its userinfo, query and fragment: none of them may reach a log line,
+    /// and each warn logs the `scheme://host:port/path` form instead.
+    #[tokio::test]
+    async fn snake_url_warns_log_scheme_host_port_and_path_only() {
+        let capture = crate::test_capture::Capture::shared();
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let snake_id = format!("snake-{id}");
+        let urls = |origin: &str, case: &str| {
+            (
+                format!(
+                    "http://user-{id}:pass-{id}@{origin}/{case}-{id}?token=secret-{id}#frag-{id}"
+                ),
+                format!("http://{origin}/{case}-{id}"),
+            )
+        };
+        let client = Client::new();
+        let timeout = Duration::from_millis(300);
+        // (message, logged url, whether the line names the battlesnake)
+        let mut expected = Vec::new();
+
+        let garbage = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&garbage)
+            .await;
+        let slow = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(3)))
+            .mount(&slow)
+            .await;
+        // A freed port refuses the connection.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let refused = listener.local_addr().unwrap().to_string();
+        drop(listener);
+
+        for (origin, case, message) in [
+            (
+                garbage.address().to_string(),
+                "garbage",
+                "Failed to parse snake info response",
+            ),
+            (
+                slow.address().to_string(),
+                "slow",
+                "Timeout fetching snake info",
+            ),
+            (
+                refused.clone(),
+                "refused",
+                "Network error fetching snake info",
+            ),
+        ] {
+            let (url, safe) = urls(&origin, case);
+            let snake = test_endpoint(&snake_id, url, EngineRegion::UsWest1);
+            assert!(request_info(&client, &snake, timeout).await.is_none());
+            expected.push((message, safe, true));
+        }
+
+        let (url, safe) = urls(&refused, "lifecycle");
+        let game = create_test_engine_game_with_snakes(vec![snake_id.as_str()]);
+        let (contexts, customizations) = (HashMap::new(), HashMap::new());
+        request_move(
+            &client,
+            &url,
+            &game,
+            &snake_id,
+            timeout,
+            None,
+            &contexts,
+            &customizations,
+        )
+        .await;
+        request_start(
+            &client,
+            &url,
+            &game,
+            &snake_id,
+            timeout,
+            &contexts,
+            &customizations,
+        )
+        .await;
+        request_end(
+            &client,
+            &url,
+            &game,
+            &snake_id,
+            timeout,
+            &contexts,
+            &customizations,
+        )
+        .await;
+        for (path, message) in [
+            ("move", "Network error calling snake, using fallback"),
+            ("start", "Failed to call /start"),
+            ("end", "Failed to call /end"),
+        ] {
+            expected.push((message, format!("{safe}/{path}"), false));
+        }
+
+        // Proxied /info: the proxy relays an unparsable body, a snake
+        // timeout, and a snake transport error.
+        for (case, status, snake_failed, message) in [
+            (
+                "proxied-garbage",
+                200,
+                false,
+                "Failed to parse snake info response",
+            ),
+            ("proxied-timeout", 504, true, "Timeout fetching snake info"),
+            (
+                "proxied-error",
+                502,
+                true,
+                "Network error fetching snake info",
+            ),
+        ] {
+            let proxy = MockServer::start().await;
+            let mut response = ResponseTemplate::new(status)
+                .insert_header(LATENCY_HEADER, "5")
+                .set_body_string("not json");
+            if snake_failed {
+                response = response.insert_header(SERVER_ERROR_HEADER, "true");
+            }
+            Mock::given(method("GET"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&proxy)
+                .await;
+            let config = EngineProxyConfig {
+                token: Some("secret".to_string()),
+                us_east4_url: proxy.uri(),
+                europe_west4_url: proxy.uri(),
+            };
+            let clients = ProxyClients {
+                direct: &client,
+                east: &client,
+                europe: &client,
+                config: &config,
+            };
+            let (url, safe) = urls(&refused, case);
+            let snake = test_endpoint(&snake_id, url, EngineRegion::UsEast4);
+            assert!(
+                request_info_routed(&clients, &snake, timeout)
+                    .await
+                    .is_none()
+            );
+            expected.push((message, safe, true));
+        }
+
+        for secret in ["user", "pass", "secret", "frag"].map(|part| format!("{part}-{id}")) {
+            let leaked = capture.log_lines_containing(&secret);
+            assert!(leaked.is_empty(), "{secret} reached a log line: {leaked:?}");
+        }
+        let lines: Vec<_> = capture
+            .log_lines()
+            .into_iter()
+            .filter(|fields| fields.get("snake_id") == Some(&snake_id))
+            .collect();
+        for (message, safe, names_battlesnake) in expected {
+            assert!(
+                lines.iter().any(|fields| {
+                    fields.get("message").map(String::as_str) == Some(message)
+                        && fields.get("url") == Some(&safe)
+                        && fields.contains_key("battlesnake_id") == names_battlesnake
+                }),
+                "no {message:?} line with url={safe}: {lines:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1711,24 +2022,52 @@ mod tests {
 
         assert_eq!(result.direction, Direction::Left);
         assert!(result.shout.is_none());
-        assert!(!result.timed_out);
-        assert!(result.errored);
+        assert!(!result.outcome.timed_out());
+        assert_eq!(result.outcome, MoveOutcome::Invalid { status_code: 200 });
         assert!(result.latency_ms.is_some());
     }
 
     #[tokio::test]
     async fn unusable_move_answers_are_errored_but_not_timed_out() {
         let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
-        for (status, body, errored) in [
-            (200, r#"{"move":"up"}"#, false),
-            (200, r#"{"move":"DOWN","shout":"hi"}"#, false),
-            (201, r#"{"move":"left"}"#, false),
-            (200, r#"{"move":"north"}"#, true),
-            (200, r#"{"shout":"no move"}"#, true),
-            (200, "not json", true),
-            (500, r#"{"move":"up"}"#, true),
-            (500, "Internal Server Error", true),
-            (404, "", true),
+        for (status, body, expected) in [
+            (
+                200,
+                r#"{"move":"up"}"#,
+                MoveOutcome::Ok { status_code: 200 },
+            ),
+            (
+                200,
+                r#"{"move":"DOWN","shout":"hi"}"#,
+                MoveOutcome::Ok { status_code: 200 },
+            ),
+            (
+                201,
+                r#"{"move":"left"}"#,
+                MoveOutcome::Ok { status_code: 201 },
+            ),
+            (
+                200,
+                r#"{"move":"north"}"#,
+                MoveOutcome::Invalid { status_code: 200 },
+            ),
+            (
+                200,
+                r#"{"shout":"no move"}"#,
+                MoveOutcome::Invalid { status_code: 200 },
+            ),
+            (200, "not json", MoveOutcome::Invalid { status_code: 200 }),
+            (
+                500,
+                r#"{"move":"up"}"#,
+                MoveOutcome::HttpError { status_code: 500 },
+            ),
+            (
+                500,
+                "Internal Server Error",
+                MoveOutcome::HttpError { status_code: 500 },
+            ),
+            (404, "", MoveOutcome::HttpError { status_code: 404 }),
         ] {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
@@ -1747,8 +2086,8 @@ mod tests {
                 &HashMap::new(),
             )
             .await;
-            assert_eq!(result.errored, errored, "{status} {body}");
-            assert!(!result.timed_out, "{status} {body}");
+            assert_eq!(result.outcome, expected, "{status} {body}");
+            assert!(!result.outcome.timed_out(), "{status} {body}");
             assert!(result.latency_ms.is_some(), "{status} {body}");
         }
     }
@@ -1777,8 +2116,145 @@ mod tests {
             &HashMap::new(),
         )
         .await;
-        assert!(result.timed_out);
-        assert!(!result.errored);
+        assert!(result.outcome.timed_out());
+        assert!(!result.outcome.errored());
+    }
+
+    /// Read one full HTTP request (headers + Content-Length body) off the
+    /// stream. hyper rejects a response that arrives while the request is
+    /// still being written (`UnexpectedMessage` → transport error), so a
+    /// raw-TCP mock must consume the whole request before answering — a
+    /// single `read` can return just the first TCP segment of a
+    /// multi-segment request body (the ~2 KB wire Game body spans two).
+    async fn read_full_request(stream: &mut tokio::net::TcpStream) {
+        let mut buf = Vec::with_capacity(4096);
+        let mut chunk = [0u8; 4096];
+        loop {
+            let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                let n = stream.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 {
+                    return;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
+            let content_length = headers
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                .and_then(|l| l.split(':').nth(1))
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if buf.len() >= header_end + 4 + content_length {
+                return;
+            }
+            let n = stream.read(&mut chunk).await.unwrap_or(0);
+            if n == 0 {
+                return;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+    }
+
+    /// DEV-2184 success criterion: headers arrive immediately, the body
+    /// stalls past the move timeout. The move timeout must cover the body
+    /// phase — `MoveOutcome::TimedOut` with the real elapsed time, not the
+    /// pre-fix errored-200 with header-time latency.
+    #[tokio::test]
+    async fn stalled_move_body_times_out_with_real_elapsed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = br#"{"move":"left"}"#;
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_full_request(&mut stream).await;
+            stream
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(),
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            // The client is long gone by now; the write may fail.
+            let _ = stream.write_all(body).await;
+        });
+        // The 2s outer client timeout is load-bearing: a deadline-path
+        // test must fail fast, never hang.
+        let client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
+        let started = Instant::now();
+        let result = request_move(
+            &client,
+            &format!("http://{address}"),
+            &game,
+            "snake-1",
+            Duration::from_millis(500),
+            Some(Direction::Right),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await;
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(result.direction, Direction::Right, "fallback move");
+        assert_eq!(result.outcome, MoveOutcome::TimedOut);
+        assert!(
+            result.latency_ms.is_some_and(|ms| ms >= 500),
+            "timeout records the real elapsed time: {:?}",
+            result.latency_ms
+        );
+        assert!(!result.outcome.errored());
+    }
+
+    /// DEV-2184: latency is measured at body completion, not at header
+    /// arrival — headers at ~0ms and a body at ~250ms must report a
+    /// >= 240ms latency (a header-time measurement would read ≪ 240).
+    #[tokio::test]
+    async fn move_latency_measured_at_body_completion() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = br#"{"move":"left"}"#;
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_full_request(&mut stream).await;
+            stream
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(),
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            stream.write_all(body).await.unwrap();
+        });
+        let client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
+        let result = request_move(
+            &client,
+            &format!("http://{address}"),
+            &game,
+            "snake-1",
+            Duration::from_millis(500),
+            Some(Direction::Right),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await;
+        assert_eq!(
+            result.direction,
+            Direction::Left,
+            "the move comes from the body"
+        );
+        assert_eq!(result.outcome, MoveOutcome::Ok { status_code: 200 });
+        assert!(
+            result.latency_ms.is_some_and(|ms| ms >= 240),
+            "latency measured at body completion: {:?}",
+            result.latency_ms
+        );
     }
 
     fn create_test_engine_game_with_snakes(snake_ids: Vec<&str>) -> EngineGame {
@@ -1812,7 +2288,8 @@ mod tests {
             },
             meta: crate::engine::GameMeta {
                 game_id: "test-game".to_string(),
-                ruleset_name: "standard".to_string(),
+                mode: engine_core::GameMode::Standard,
+                game_over_rule: engine_core::GameMode::Standard.default_game_over_rule(),
                 timeout: 500,
                 settings: StandardSettings::default(),
                 royale: None,
@@ -1839,16 +2316,15 @@ mod tests {
             snake_id: "test".to_string(),
             direction: Direction::Up,
             latency_ms: Some(100),
-            timed_out: false,
             shout: Some("hello".to_string()),
-            status_code: Some(200),
-            errored: false,
+            outcome: MoveOutcome::Ok { status_code: 200 },
         };
         let cloned = result.clone();
         assert_eq!(cloned.snake_id, "test");
         assert_eq!(cloned.direction, Direction::Up);
         assert_eq!(cloned.latency_ms, Some(100));
-        assert!(!cloned.timed_out);
+        assert!(!cloned.outcome.timed_out());
+        assert_eq!(cloned.outcome, MoveOutcome::Ok { status_code: 200 });
         assert_eq!(cloned.shout, Some("hello".to_string()));
     }
 

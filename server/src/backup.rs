@@ -8,10 +8,18 @@
 //! completion arithmetic could never be satisfied once a job's count was
 //! lost (batch 11 stalled 2026-01-27 with `jobs_enqueued = 501` against a
 //! discovery `LIMIT 500`).
+//!
+//! Archive jobs serialize via the shared `"archive"` cja concurrency key
+//! declared in `jobs.rs` (DEV-2432): one archive operation at a time per
+//! process, enforced at claim, so a wedged holder parks zero workers. The
+//! attempt's `ConcurrencySlot` moves into the `spawn_blocking` closures so
+//! bounded CPU work keeps holding the budget even if its attempt future
+//! is dropped (arena#221).
 
 use std::io::Write;
 
 use chrono::{DateTime, Duration, Utc};
+use cja::jobs::ConcurrencySlot;
 use color_eyre::eyre::{Context as _, eyre};
 use sqlx::{FromRow, PgPool};
 
@@ -20,25 +28,9 @@ use crate::jobs::BackupSingleGameJob;
 use crate::state::AppState;
 use cja::jobs::Job;
 
-/// Backups run one at a time per process. Discovery enqueues a burst of
-/// jobs every hour, and prod has a single vCPU shared with live games: a
-/// burst of concurrent frame parsing + zstd stalled every running game for
-/// ~300ms, long enough to time out snakes mid-turn.
-///
-/// Shared by Play (backup.rs) and native (native_backup.rs) archive jobs —
-/// one backup at a time process-wide. Held as an `Arc` so native jobs can
-/// take owned permits into `spawn_blocking` (a borrowed permit would be
-/// freed early if a deploy drains the job future mid-compress).
-pub(crate) static BACKUP_SLOT: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
-    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
-
 /// Job priority for [`BackupSingleGameJob`], below the default 0 that game
-/// runners use. cja claims `ORDER BY priority DESC, run_at, created_at`, and a
-/// claimed backup holds its worker while it waits for [`BACKUP_SLOT`], so an
-/// hourly burst of ~1,100 backups pins most workers and frees them one backup at
-/// a time. At equal priority each freed worker took the next backup, and a game
-/// queued behind the burst waited 15-111s to start. Lower, the next freed worker
-/// takes the game.
+/// runners use. cja claims `ORDER BY priority DESC, run_at, created_at`,
+/// so claims prefer game runners when both are runnable.
 pub(crate) const BACKUP_JOB_PRIORITY: i32 = -10;
 
 /// zstd level for archive objects. 9 vs the old 3 is 1.5-1.8x smaller for
@@ -68,29 +60,31 @@ pub(crate) async fn enqueue_backup_job(
 
 /// Row from Engine's games table
 #[derive(FromRow)]
-struct EngineGameRow {
-    id: String,
-    value: serde_json::Value,
+pub(crate) struct EngineGameRow {
+    pub(crate) id: String,
+    pub(crate) value: serde_json::Value,
     /// Engine DB uses TIMESTAMP (no timezone), not TIMESTAMPTZ. sqlx pins
     /// pooled sessions' TimeZone to UTC, so the naive value decodes as UTC
     /// deterministically.
-    created: chrono::NaiveDateTime,
+    pub(crate) created: chrono::NaiveDateTime,
 }
 
-/// Fetch completed games from the Engine database within the given time window.
-async fn fetch_completed_games(
-    engine_db: &PgPool,
-    hours_ago: i64,
-) -> cja::Result<Vec<EngineGameRow>> {
+/// Fetch the IDs of completed games from the Engine database within the
+/// given time window. Id-only (DEV-2427): the discovery does not need the
+/// full JSON rows — the archived check and pending-job skip are batched on
+/// the arena DB, and per-game rows are fetched by the jobs themselves under
+/// the slot.
+async fn fetch_completed_game_ids(engine_db: &PgPool, hours_ago: i64) -> cja::Result<Vec<String>> {
     // Engine DB uses TIMESTAMP (no timezone), so use NaiveDateTime
     let since = (Utc::now() - Duration::hours(hours_ago)).naive_utc();
 
-    // Note: We use query_as (not the macro) because this is a different database
+    // Note: We use query (not the macro) because this is a different database
     // with a different schema that sqlx doesn't know about at compile time.
     // Limit to 5000 as a safety valve - if we hit this, we'll catch the rest next run.
-    let rows: Vec<EngineGameRow> = sqlx::query_as(
+    // Same filter/LIMIT as the pre-DEV-2427 full-row fetch.
+    let ids: Vec<String> = sqlx::query_scalar(
         r#"
-        SELECT id, value, created
+        SELECT id
         FROM games
         WHERE value->>'Status' IN ('complete', 'error')
           AND created >= $1
@@ -101,13 +95,16 @@ async fn fetch_completed_games(
     .bind(since)
     .fetch_all(engine_db)
     .await
-    .wrap_err("Failed to fetch completed games from Engine")?;
+    .wrap_err("Failed to fetch completed game ids from Engine")?;
 
-    Ok(rows)
+    Ok(ids)
 }
 
 /// Fetch a single game from the Engine database by ID.
-async fn fetch_game_by_id(engine_db: &PgPool, game_id: &str) -> cja::Result<Option<EngineGameRow>> {
+pub(crate) async fn fetch_game_by_id(
+    engine_db: &PgPool,
+    game_id: &str,
+) -> cja::Result<Option<EngineGameRow>> {
     let row: Option<EngineGameRow> = sqlx::query_as(
         r#"
         SELECT id, value, created
@@ -130,17 +127,17 @@ pub(crate) const EXPORT_FRAME_PAGE_SIZE: i64 = 200;
 
 #[derive(FromRow)]
 pub(crate) struct FrameTextRow {
-    turn: i32,
+    pub(crate) turn: i32,
     /// `game_frames.value` is nullable in the engine schema: NULL maps to
     /// None here and is classified Permanent ("frame_null_value"), never
     /// a transient fetch error.
-    value_text: Option<String>,
+    pub(crate) value_text: Option<String>,
 }
 
 /// One page of a game's frames as raw JSON text (keyset on turn). `::text`
 /// makes Postgres render the JSONB server-side; the String decode is a
 /// memcpy. No serde work on the async worker.
-async fn fetch_game_frame_texts_page(
+pub(crate) async fn fetch_game_frame_texts_page(
     engine_db: &PgPool,
     game_id: &str,
     after_turn: i32,
@@ -186,7 +183,7 @@ async fn is_already_archived(db: &PgPool, engine_game_id: &str) -> cja::Result<b
 /// Generate the GCS path for a game based on its creation date. The date is
 /// the engine `created` COLUMN (DEV-1984): pre-2023 `value` rows often lack
 /// a `Created` key, which used to date every such object 1970-01-01.
-fn gcs_path(game_id: &str, created_at: DateTime<Utc>) -> String {
+pub(crate) fn gcs_path(game_id: &str, created_at: DateTime<Utc>) -> String {
     format!(
         "games/{}/{:02}/{:02}/{}.json.zst",
         created_at.format("%Y"),
@@ -339,11 +336,15 @@ pub(crate) enum ExportBuildError {
 /// [`ExportWriter`] — peak memory is ~one page regardless of game length
 /// (the max 5,567-frame game is 28 pages; the old whole-game fetch was the
 /// OOM-correlated shape on the 1 GiB prod box). Parse/serialize/compress
-/// runs on the blocking pool under the backup slot; only the slot holder
-/// reaches this function.
-async fn build_export_streamed(
+/// runs on the blocking pool under the shared "archive" budget: the
+/// caller's `ConcurrencySlot` keeps the budget for the rest of the body
+/// (upload + record); each blocking closure gets a slot CLONE bound with a
+/// NAMED `let _held = …;` as its first statement, so a dropped attempt
+/// never frees the budget while CPU work runs (arena#221).
+pub(crate) async fn build_export_streamed(
     engine_db: &PgPool,
     game: EngineGame,
+    slot: ConcurrencySlot,
 ) -> Result<Vec<u8>, ExportBuildError> {
     // The game header just parsed, so only an internal serialize/zstd
     // failure lands here — never bad data. That is transient by
@@ -365,7 +366,12 @@ async fn build_export_streamed(
         if page.iter().any(|row| row.value_text.is_none()) {
             return Err(ExportBuildError::Permanent("frame_null_value".to_string()));
         }
+        let slot_page = slot.clone();
         let (returned_writer, result) = tokio::task::spawn_blocking(move || {
+            // arena#221: named binding holds the shared budget for the
+            // CPU work even if the attempt future is dropped. NEVER
+            // `let _ = slot;` — that drops the clone and releases it.
+            let _held = slot_page;
             let mut writer = writer;
             let result = writer.push_frame_texts(&page);
             (writer, result)
@@ -388,11 +394,16 @@ async fn build_export_streamed(
     if writer.frame_count() == 0 {
         return Err(ExportBuildError::Permanent("no_frames".to_string()));
     }
-    let bytes = tokio::task::spawn_blocking(move || writer.finish(Utc::now()))
-        .await
-        .wrap_err("Export finish task panicked")
-        .map_err(ExportBuildError::Transient)?
-        .map_err(ExportBuildError::Transient)?;
+    let slot_finish = slot.clone();
+    let bytes = tokio::task::spawn_blocking(move || {
+        // arena#221: same named-binding rule as the per-page closure.
+        let _held = slot_finish;
+        writer.finish(Utc::now())
+    })
+    .await
+    .wrap_err("Export finish task panicked")
+    .map_err(ExportBuildError::Transient)?
+    .map_err(ExportBuildError::Transient)?;
     Ok(bytes)
 }
 
@@ -562,24 +573,66 @@ pub async fn run_backup_discovery(app_state: &AppState) -> Result<(), BackupErro
         }
     };
 
-    // Fetch games from the lookback window
-    let games = fetch_completed_games(engine_db, BACKUP_WINDOW_HOURS).await?;
+    // Fetch game ids from the lookback window
+    let ids = fetch_completed_game_ids(engine_db, BACKUP_WINDOW_HOURS).await?;
     tracing::info!(
-        count = games.len(),
+        count = ids.len(),
         "Found completed games to check for archival"
     );
+
+    if ids.is_empty() {
+        tracing::info!(enqueued = 0, skipped = 0, "Backup discovery complete");
+        return Ok(());
+    }
+
+    // Batched archived check (one query for the whole window instead of
+    // one full-row scan per game; DEV-2427). The arena-side `= ANY($1)`
+    // lookup logging as a "slow statement" at 1-2s in prod is expected —
+    // it is strictly cheaper than the old per-game walk.
+    let archived: std::collections::HashSet<String> = sqlx::query_scalar!(
+        r#"
+            SELECT DISTINCT engine_game_id AS "id!" FROM games
+            WHERE engine_game_id = ANY($1) AND archived_at IS NOT NULL
+            "#,
+        &ids
+    )
+    .fetch_all(&app_state.db)
+    .await
+    .wrap_err("Failed to batch-check archived games")?
+    .into_iter()
+    .collect();
+
+    // Pending-job skip, scoped to this window's ids so it never scans an
+    // unrelated backlog: any `BackupSingleGameJob` row for the id —
+    // including one waiting out retry backoff — suppresses re-enqueue
+    // (intended dedup: the row retries or dead-letters on its own). cja's
+    // enqueue is a plain INSERT with no dedup, so this is what stops the
+    // hourly discovery from stacking duplicate rows (DEV-2427).
+    let pending: std::collections::HashSet<String> = sqlx::query_scalar!(
+        r#"
+            SELECT DISTINCT payload->>'engine_game_id' AS "id!" FROM jobs
+            WHERE name = 'BackupSingleGameJob'
+              AND payload->>'engine_game_id' = ANY($1)
+            "#,
+        &ids
+    )
+    .fetch_all(&app_state.db)
+    .await
+    .wrap_err("Failed to batch-check pending backup jobs")?
+    .into_iter()
+    .collect();
 
     let mut enqueued_count = 0;
     let mut skipped_count = 0;
 
-    for game_row in games {
-        // Check if already archived
-        if is_already_archived(&app_state.db, &game_row.id).await? {
+    for id in ids {
+        // Skip if already archived or a backup job is already queued
+        if archived.contains(&id) || pending.contains(&id) {
             skipped_count += 1;
             continue;
         }
 
-        enqueue_backup_job(app_state, &game_row.id).await?;
+        enqueue_backup_job(app_state, &id).await?;
 
         enqueued_count += 1;
     }
@@ -593,35 +646,48 @@ pub async fn run_backup_discovery(app_state: &AppState) -> Result<(), BackupErro
     Ok(())
 }
 
-/// Backup a single game from the Engine database to GCS.
+/// Test/direct-call entry: no shared-budget serialization (the worker
+/// path goes through `BackupSingleGameJob::run_with_cancellation`, which
+/// passes the attempt's tracked slot). A future production caller must
+/// enqueue a job or accept untracked semantics.
 ///
-/// Called by `BackupSingleGameJob`, shared by the hourly discovery and the
-/// play-history walk (DEV-1984). Slot-first (like native backup): only the
-/// slot holder fetches per-game data, the already-archived re-check happens
-/// UNDER the slot (a duplicate job no-ops instead of double-putting), and a
-/// game that can never be archived is recorded in `play_archive_exceptions`
-/// and returns `Ok` so the walk moves on. Transient failures return `Err`
-/// and retry through cja's backoff.
+/// A game that can never be archived is recorded in
+/// `play_archive_exceptions` and returns `Ok` so the walk moves on;
+/// transient failures return `Err` and retry through cja's backoff.
 pub async fn backup_single_game(
     app_state: &AppState,
     engine_game_id: &str,
+) -> Result<(), BackupError> {
+    backup_single_game_with_slot(app_state, engine_game_id, ConcurrencySlot::untracked()).await
+}
+
+/// The worker path. `slot` is the attempt's handle on the shared
+/// "archive" budget; clones moved into `spawn_blocking` closures keep the
+/// budget held until that bounded CPU work returns, even if this future
+/// is dropped (arena#221).
+pub(crate) async fn backup_single_game_with_slot(
+    app_state: &AppState,
+    engine_game_id: &str,
+    slot: ConcurrencySlot,
 ) -> Result<(), BackupError> {
     let engine_db = match &app_state.engine_db {
         Some(db) => db,
         None => return Err(eyre!("Engine database not configured").into()),
     };
+    backup_single_game_body(app_state, engine_db, engine_game_id, slot).await
+}
 
-    // SLOT FIRST — only the holder fetches per-game data, and the archived
-    // re-check below runs under the slot so a duplicate enqueued behind
-    // this job sees its completed mark. The permit lives to the end of the
-    // function (slot held through upload + record, like native backup).
-    let _permit = std::sync::Arc::clone(&BACKUP_SLOT)
-        .acquire_owned()
-        .await
-        .wrap_err("Backup slot semaphore closed")?;
-
-    // Req 6 (DEV-1984): re-check archived state under the slot — no put
-    // for an already-archived game, ever.
+/// The body of [`backup_single_game_with_slot`], run inside the attempt
+/// (the predicate re-check happens inside the attempt: a duplicate
+/// enqueued behind this one sees its completed mark).
+async fn backup_single_game_body(
+    app_state: &AppState,
+    engine_db: &PgPool,
+    engine_game_id: &str,
+    slot: ConcurrencySlot,
+) -> Result<(), BackupError> {
+    // Req 6 (DEV-1984): re-check archived state inside the attempt — no
+    // put for an already-archived game, ever.
     if is_already_archived(&app_state.db, engine_game_id).await? {
         tracing::debug!(game_id = %engine_game_id, "Game already archived, skipping");
         return Ok(());
@@ -660,7 +726,7 @@ pub async fn backup_single_game(
         game.created = created_at.timestamp_micros();
     }
 
-    let compressed = match build_export_streamed(engine_db, game.clone()).await {
+    let compressed = match build_export_streamed(engine_db, game.clone(), slot.clone()).await {
         Ok(bytes) => bytes,
         Err(ExportBuildError::Permanent(reason)) => {
             record_permanent_failure(&app_state.db, engine_game_id, &reason).await?;
@@ -837,16 +903,17 @@ mod tests {
     fn v2_export_is_self_describing_and_strips_snake_urls() {
         let game: EngineGame = serde_json::from_value(fixture_game_json("g-v2", 0)).unwrap();
 
-        // Frame 0: MUST list every one of EngineSnake's 20 fields in canonical
+        // Frame 0: MUST list every one of EngineSnake's 21 fields in canonical
         // serialized form — ID, Name, URL, Body, Health, Death, Color, HeadType,
-        // TailType, Latency (string), Shout, Squad, APIVersion (string), Author,
-        // StatusCode, Error, TimingMicros, IsBot, IsEnvironment, ProxyURL — plus
-        // every EngineGameFrame field (Turn, Snakes, Food, Hazards, GameState,
-        // PointState). Only a complete canonical fixture survives the typed
-        // round-trip unchanged, so "input minus the three stripped keys == output"
-        // is an exact Value equality below. The equality doubles as a canary: if a
-        // field is later added to EngineSnake without updating this fixture, the
-        // round-trip materializes it (null/default) and the assert fails loudly.
+        // TailType, Latency (string), Shout, Squad, Team, APIVersion (string),
+        // Author, StatusCode, Error, TimingMicros, IsBot, IsEnvironment,
+        // ProxyURL — plus every EngineGameFrame field (Turn, Snakes, Food,
+        // Hazards, GameState, PointState). Only a complete canonical fixture
+        // survives the typed round-trip unchanged, so "input minus the three
+        // stripped keys == output" is an exact Value equality below. The
+        // equality doubles as a canary: if a field is later added to
+        // EngineSnake without updating this fixture, the round-trip
+        // materializes it (null/default) and the assert fails loudly.
         // Note GameState values MUST be strings — the field is a
         // HashMap<String, String> (engine_models.rs) and non-string values fail
         // deserialization.
@@ -866,6 +933,7 @@ mod tests {
                     "Latency": "12",
                     "Shout": "hello",
                     "Squad": "alpha",
+                    "Team": "Orb Weavers",
                     "APIVersion": "1",
                     "Author": "coreyja",
                     "StatusCode": 200,
@@ -1516,8 +1584,8 @@ mod tests {
         Ok(())
     }
 
-    /// A claimed backup waits on BACKUP_SLOT while holding its worker, so a
-    /// burst must sort below game runners or new games queue behind it.
+    /// Backups sort below the default priority game runners use, so
+    /// claims prefer runners when both are runnable.
     #[sqlx::test(migrations = "../migrations")]
     async fn backups_queue_below_default_priority_jobs(pool: sqlx::PgPool) -> cja::Result<()> {
         let app_state = AppState::test_from_pool(pool.clone());
@@ -1548,24 +1616,5 @@ mod tests {
             "a game runner must out-rank queued backups"
         );
         Ok(())
-    }
-
-    /// Backups are serialized process-wide so an hourly burst can't
-    /// monopolize the CPU live games run on.
-    #[tokio::test]
-    async fn backup_slot_admits_one_backup_at_a_time() {
-        let held = BACKUP_SLOT.acquire().await.unwrap();
-        assert!(BACKUP_SLOT.try_acquire().is_err());
-        drop(held);
-        // Race-free re-admission: the slot is shared process-wide with
-        // native_backup's tests, which may hold a permit at this instant —
-        // so await one under a timeout instead of asserting try_acquire
-        // (which flakes when another test holds the slot right after drop).
-        let readmitted =
-            tokio::time::timeout(std::time::Duration::from_secs(10), BACKUP_SLOT.acquire())
-                .await
-                .expect("backup slot stayed busy for 10s")
-                .unwrap();
-        drop(readmitted);
     }
 }

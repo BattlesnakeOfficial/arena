@@ -59,3 +59,33 @@ jobs:
         # the integration-test binaries (play_cli, play_review_pins, …)
         # have executed — their results are part of the platform evidence.
         run: cargo test -p battlesnake --no-fail-fast
+
+  # DEV-2306: the release's licence gate, at PR time. Mirrors the notices
+  # job in cli-release.yml (same config, same --fail) so an unaccepted
+  # licence in a new dependency fails here first.
+  licence-notices:
+    name: cargo about (licence gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cli-notices-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install cargo-about
+        run: cargo install --locked --version 0.9.3 --features cli cargo-about
+
+      - name: Generate third-party licence notices (must satisfy cli/about.toml)
+        run: |
+          cargo about generate --locked --fail \
+            -m cli/Cargo.toml \
+            -o "$RUNNER_TEMP/THIRD_PARTY_LICENSES.md" \
+            cli/about.hbs
+          test -s "$RUNNER_TEMP/THIRD_PARTY_LICENSES.md"

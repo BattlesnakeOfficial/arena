@@ -3,7 +3,7 @@ use std::error::Error;
 use vergen::EmitBuilder;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    println!("cargo:rerun-if-changed=migrations");
+    println!("cargo:rerun-if-changed=../migrations");
     println!("cargo:rerun-if-changed=static");
 
     cja_build::AssetsBuilder::new()

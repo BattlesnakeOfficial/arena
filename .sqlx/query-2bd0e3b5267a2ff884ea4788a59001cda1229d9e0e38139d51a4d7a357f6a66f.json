@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE dropped_fields_repair_queue SET status = 'pending', reason = NULL WHERE engine_game_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2bd0e3b5267a2ff884ea4788a59001cda1229d9e0e38139d51a4d7a357f6a66f"
+}

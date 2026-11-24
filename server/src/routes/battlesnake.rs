@@ -18,7 +18,7 @@ use crate::{
     models::battlesnake::{self, CreateBattlesnake, EngineRegion, UpdateBattlesnake, Visibility},
     models::game_battlesnake,
     models::leaderboard,
-    models::leaderboard_entry_health,
+    models::leaderboard_registration,
     models::oauth,
     models::session,
     models::snake_latency,
@@ -34,7 +34,7 @@ use crate::{
 // Parsed new/edit battlesnake form. Parsed by hand from the urlencoded body
 // because the tag checkboxes submit a repeated `tags` key, which
 // `axum::Form` (serde_urlencoded) can't deserialize into a Vec.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct BattlesnakeFormData {
     name: String,
     url: String,
@@ -42,6 +42,27 @@ struct BattlesnakeFormData {
     #[serde(default)]
     engine_region: EngineRegion,
     tag_ids: Vec<Uuid>,
+    /// Pending drafts saved before this field existed default to allowed,
+    /// matching the column default.
+    #[serde(default = "default_allow_tournament_import")]
+    allow_tournament_import: bool,
+}
+
+fn default_allow_tournament_import() -> bool {
+    true
+}
+
+impl Default for BattlesnakeFormData {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            url: String::new(),
+            visibility: Visibility::default(),
+            engine_region: EngineRegion::default(),
+            tag_ids: Vec::new(),
+            allow_tournament_import: default_allow_tournament_import(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -70,6 +91,7 @@ fn bounded_form_copy(form: &BattlesnakeFormData) -> BattlesnakeFormData {
             .take(tag::MAX_TAGS_PER_SNAKE * 4)
             .copied()
             .collect(),
+        allow_tournament_import: form.allow_tournament_import,
     }
 }
 
@@ -79,6 +101,8 @@ fn parse_battlesnake_form(bytes: &[u8]) -> Result<BattlesnakeFormData, String> {
     let mut visibility = None;
     let mut engine_region = None;
     let mut tag_ids = Vec::new();
+    // An unchecked checkbox submits nothing, so absence means opted out.
+    let mut allow_tournament_import = false;
 
     for (key, value) in url::form_urlencoded::parse(bytes) {
         match key.as_ref() {
@@ -100,6 +124,7 @@ fn parse_battlesnake_form(bytes: &[u8]) -> Result<BattlesnakeFormData, String> {
             }
             "tags" => tag_ids
                 .push(Uuid::parse_str(&value).map_err(|_| "Invalid tag selection".to_string())?),
+            "allow_tournament_import" => allow_tournament_import = true,
             _ => {}
         }
     }
@@ -112,6 +137,7 @@ fn parse_battlesnake_form(bytes: &[u8]) -> Result<BattlesnakeFormData, String> {
         visibility: visibility.ok_or_else(|| "Visibility is required".to_string())?,
         engine_region: engine_region.ok_or_else(|| "Engine region is required".to_string())?,
         tag_ids,
+        allow_tournament_import,
     })
 }
 
@@ -180,6 +206,14 @@ fn battlesnake_form(
                 p class="help" { "Only controls who can pick this snake in Create Game. It always shows on your profile and in the games it plays, and you can still enter it in leaderboards and tournaments." }
             }
             div class="field" {
+                label style="display:inline-flex; align-items:center; gap:6px; min-height:44px;" {
+                    input type="checkbox" id="allow_tournament_import" name="allow_tournament_import" value="on"
+                        checked[form.allow_tournament_import];
+                    "Allow leaderboard imports"
+                }
+                p class="help" { "Tournament organizers can import the top snakes from a leaderboard into their tournament. Uncheck to keep this snake out of other people's tournament imports. Private snakes are never imported." }
+            }
+            div class="field" {
                 label for="engine_region" { "Engine region" }
                 select id="engine_region" name="engine_region" required style="min-height:44px;font-size:16px;" {
                     @for region in EngineRegion::ALL {
@@ -224,6 +258,7 @@ async fn load_public_battlesnake_page(
     search: &str,
 ) -> cja::Result<PublicBattlesnakePage> {
     let mut query = battlesnake::PublicBattlesnakeQuery {
+        selectable_only: false,
         search,
         excluded_owner_id: None,
         page: 0,
@@ -325,7 +360,9 @@ fn render_public_battlesnake_list(
                                     }
                                     td class="r" {
                                         div class="row-actions" {
-                                            @if is_authenticated {
+                                            @if snake.retired_at.is_some() {
+                                                span class="badge" { "Retired" }
+                                            } @else if is_authenticated {
                                                 form action={"/battlesnakes/"(snake.battlesnake_id)"/challenge"} method="post" {
                                                     button type="submit" class="btn sm solid" { "Challenge" }
                                                 }
@@ -456,6 +493,9 @@ pub async fn list_battlesnakes(
                                             span class="chip" style={"background:" (chip_color(&snake.color))} {}
                                             span class="snake-details" {
                                                 a class="name" href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} { (snake.name) }
+                                                @if snake.retired_at.is_some() {
+                                                    span class="badge" { "Retired" }
+                                                }
                                                 @if let Some(host) = hosting.get(&snake.battlesnake_id) {
                                                     @if let Some(homepage) = oauth::renderable_https_url(&host.homepage_url) {
                                                         a class="badge host-badge" href=(homepage) rel="noopener" {
@@ -724,6 +764,7 @@ pub async fn create_battlesnake(
         url,
         visibility: form.visibility,
         engine_region: form.engine_region,
+        allow_tournament_import: form.allow_tournament_import,
     };
 
     // Create the new battlesnake in the database
@@ -732,12 +773,15 @@ pub async fn create_battlesnake(
 
     match battlesnake_result {
         Ok(snake) => {
-            tracing::info!(
-                event_type = "battlesnake_created",
-                battlesnake_id = %snake.battlesnake_id,
-                user_id = %user.user_id,
-                source = "web",
-                "battlesnake created"
+            cja::product_event!(
+                name: "battlesnake_created",
+                user_id: Some(&user.user_id),
+                message: "battlesnake created",
+                properties: {
+                    battlesnake_id = %snake.battlesnake_id,
+                    snake_name = %snake.name,
+                    source = "web",
+                }
             );
             tag::set_tags_for_battlesnake(&state.db, snake.battlesnake_id, &form.tag_ids)
                 .await
@@ -832,6 +876,7 @@ pub async fn edit_battlesnake(
         visibility: battlesnake.visibility,
         engine_region: battlesnake.engine_region,
         tag_ids: selected_tag_ids,
+        allow_tournament_import: battlesnake.allow_tournament_import,
     };
     let form = match session::take_pending_form_data(&state.db, session.session_id)
         .await
@@ -987,6 +1032,7 @@ pub async fn update_battlesnake(
         url,
         visibility: form.visibility,
         engine_region: Some(form.engine_region),
+        allow_tournament_import: Some(form.allow_tournament_import),
     };
 
     // Update the battlesnake
@@ -1085,6 +1131,86 @@ pub async fn delete_battlesnake(
     Ok(Redirect::to("/battlesnakes").into_response())
 }
 
+pub async fn retire_battlesnake(
+    State(state): State<AppState>,
+    CurrentUserWithSession { user, session }: CurrentUserWithSession,
+    Path(battlesnake_id): Path<Uuid>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    use battlesnake::RetireBattlesnakeOutcome;
+    let (message, kind) = match battlesnake::retire_battlesnake(
+        &state.db,
+        battlesnake_id,
+        user.user_id,
+    )
+    .await
+    .wrap_err("Failed to retire battlesnake")?
+    {
+        RetireBattlesnakeOutcome::Retired {
+            withdrawn_registrations,
+        } => (
+            if withdrawn_registrations == 0 {
+                "Enjoy the retirement!".to_string()
+            } else {
+                format!(
+                    "Enjoy the retirement! Withdrawn from {withdrawn_registrations} unopened tournament registration(s); unretiring will not restore them."
+                )
+            },
+            session::FLASH_TYPE_SUCCESS,
+        ),
+        RetireBattlesnakeOutcome::AlreadyRetired => (
+            "This battlesnake is already retired.".to_string(),
+            session::FLASH_TYPE_ERROR,
+        ),
+        RetireBattlesnakeOutcome::InActiveTournament => (
+            "This battlesnake is registered in an active tournament. Withdraw it first."
+                .to_string(),
+            session::FLASH_TYPE_ERROR,
+        ),
+        RetireBattlesnakeOutcome::NotFound => {
+            return Err(
+                "Battlesnake not found or you don't have permission to retire it".to_string(),
+            )
+            .with_status(StatusCode::FORBIDDEN);
+        }
+    };
+    session::set_flash_message(&state.db, session.session_id, message, kind)
+        .await
+        .wrap_err("Failed to set retirement flash")?;
+    Ok(Redirect::to(&format!("/battlesnakes/{battlesnake_id}/profile")).into_response())
+}
+
+pub async fn unretire_battlesnake(
+    State(state): State<AppState>,
+    CurrentUserWithSession { user, session }: CurrentUserWithSession,
+    Path(battlesnake_id): Path<Uuid>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    use battlesnake::UnretireBattlesnakeOutcome;
+    let (message, kind) =
+        match battlesnake::unretire_battlesnake(&state.db, battlesnake_id, user.user_id)
+            .await
+            .wrap_err("Failed to unretire battlesnake")?
+        {
+            UnretireBattlesnakeOutcome::Unretired => (
+                "Out of retirement and hungry 🐍".to_string(),
+                session::FLASH_TYPE_SUCCESS,
+            ),
+            UnretireBattlesnakeOutcome::AlreadyActive => (
+                "This battlesnake is already active.".to_string(),
+                session::FLASH_TYPE_ERROR,
+            ),
+            UnretireBattlesnakeOutcome::NotFound => {
+                return Err(
+                    "Battlesnake not found or you don't have permission to unretire it".to_string(),
+                )
+                .with_status(StatusCode::FORBIDDEN);
+            }
+        };
+    session::set_flash_message(&state.db, session.session_id, message, kind)
+        .await
+        .wrap_err("Failed to set unretirement flash")?;
+    Ok(Redirect::to(&format!("/battlesnakes/{battlesnake_id}/profile")).into_response())
+}
+
 const PROFILE_HISTORY_PER_PAGE: i64 = 50;
 
 #[derive(Debug, serde::Deserialize)]
@@ -1113,7 +1239,24 @@ pub async fn reactivate_battlesnake(
         .with_status(StatusCode::FORBIDDEN);
     }
 
-    let resumed = leaderboard_entry_health::reactivate_snake(&state.db, battlesnake_id)
+    let snake = battlesnake::get_battlesnake_by_id(&state.db, battlesnake_id)
+        .await
+        .wrap_err("Failed to fetch battlesnake for reactivation")?;
+    if snake.is_some_and(|snake| snake.retired_at.is_some()) {
+        session::set_flash_message(
+            &state.db,
+            session.session_id,
+            "This battlesnake is retired — unretire it first.".to_string(),
+            session::FLASH_TYPE_ERROR,
+        )
+        .await
+        .wrap_err("Failed to set flash message")?;
+        return Ok(
+            Redirect::to(&format!("/battlesnakes/{battlesnake_id}/profile")).into_response(),
+        );
+    }
+
+    let resumed = leaderboard_registration::reactivate_snake(&state.db, battlesnake_id)
         .await
         .wrap_err("Failed to reactivate battlesnake")?;
 
@@ -1174,7 +1317,7 @@ struct ProfileView<'a> {
     total_pages: i64,
     leaderboard_entries: &'a [leaderboard::BattlesnakeLeaderboardSummary],
     /// Entries the health sweeper pulled; only ever shown to the owner.
-    health_paused: &'a [leaderboard_entry_health::HealthPausedEntry],
+    health_paused: &'a [leaderboard_registration::HealthPausedLeague],
     tags: &'a [tag::Tag],
     latency: &'a snake_latency::RecentLatency,
     /// The hosting client whose mark this snake carries, for the
@@ -1231,6 +1374,13 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                     width="128" height="40";
                 div class="snake-id" {
                     h1 { (snake.name) }
+                    @if let Some(retired_at) = snake.retired_at {
+                        div class="retired-notice" {
+                            "Hung up its fangs on " (retired_at.format("%b %-d, %Y")) ". "
+                            strong { "Retired" }
+                            " from competition, legacy intact: stats and ratings live on."
+                        }
+                    }
                     div class="sub owner-line" {
                         "by "
                         (user_avatar(view.owner_avatar_url, view.owner_name, "owner-avatar"))
@@ -1289,17 +1439,27 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                                 button type="submit" class="btn" { "Test Snake" }
                             }
                             a href={"/battlesnakes/"(battlesnake_id)"/edit"} class="btn" { "Edit" }
+                            @if snake.retired_at.is_some() {
+                                form action={"/battlesnakes/"(battlesnake_id)"/unretire"} method="post" {
+                                    button type="submit" class="btn" { "Unretire" }
+                                }
+                            } @else {
+                                form action={"/battlesnakes/"(battlesnake_id)"/retire"} method="post" {
+                                    button type="submit" class="btn"
+                                        data-confirm="Retire this battlesnake? Registrations in unopened tournaments will be withdrawn. Unretiring will not restore them." { "Retire" }
+                                }
+                            }
                             form action={"/battlesnakes/"(battlesnake_id)"/delete"} method="post" {
                                 button type="submit" class="btn danger"
                                     data-confirm="Are you sure you want to delete this battlesnake?" { "Delete" }
                             }
                         }
-                        ProfileViewer::Visitor if is_public => {
+                        ProfileViewer::Visitor if is_public && snake.retired_at.is_none() => {
                             form action={"/battlesnakes/"(battlesnake_id)"/challenge"} method="post" {
                                 button type="submit" class="btn solid" { "Challenge" }
                             }
                         }
-                        ProfileViewer::Anonymous if is_public => {
+                        ProfileViewer::Anonymous if is_public && snake.retired_at.is_none() => {
                             a href="/auth/github" class="btn" { "Sign in to challenge" }
                         }
                         _ => {}
@@ -1310,7 +1470,7 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
             // Auto-deactivation notice: the health sweeper pulled this snake
             // from matchmaking on some leaderboards; the owner can resume
             // once it's fixed.
-            @if !health_paused.is_empty() {
+            @if !health_paused.is_empty() && snake.retired_at.is_none() {
                 div class="form-error snake-paused" {
                     p {
                         strong { "Paused from leaderboard matchmaking. " }
@@ -1411,26 +1571,41 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                                 @for entry in view.leaderboard_entries {
                                     tr {
                                         td {
-                                            a href={"/leaderboards/"(entry.leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
-                                                (entry.leaderboard_name)
+                                            @if let Some(entry_id) = entry.leaderboard_entry_id {
+                                                a href={"/leaderboards/"(entry.leaderboard_id)"/entries/"(entry_id)} {
+                                                    (entry.leaderboard_name)
+                                                }
+                                            } @else {
+                                                a href={"/leaderboards/"(entry.leaderboard_id)} {
+                                                    (entry.leaderboard_name)
+                                                }
                                             }
                                             @if entry.leaderboard_visibility == Visibility::Private {
                                                 " "
                                                 span class="live-pill quiet" { "Private ladder" }
                                             }
                                         }
-                                        td class="r num" { (format!("{:.1}", entry.display_score)) }
-                                        td class="r num" { (entry.games_played) }
+                                        @let games_played = entry.games_played.unwrap_or(0);
                                         td class="r num" {
-                                            @if entry.games_played > 0 {
-                                                (format!("{:.0}%", f64::from(entry.first_place_finishes) / f64::from(entry.games_played) * 100.0))
+                                            @if let Some(score) = entry.display_score {
+                                                (format!("{score:.1}"))
+                                            } @else {
+                                                "—"
+                                            }
+                                        }
+                                        td class="r num" { (games_played) }
+                                        td class="r num" {
+                                            @if games_played > 0 {
+                                                (format!("{:.0}%", f64::from(entry.first_place_finishes.unwrap_or(0)) / f64::from(games_played) * 100.0))
                                             } @else {
                                                 "—"
                                             }
                                         }
                                         td class="r" {
-                                            @if entry.disabled_at.is_some()
-                                                && entry.disabled_reason.as_deref() == Some(leaderboard_entry_health::DISABLED_REASON_HEALTH)
+                                            @if entry.disabled_reason.as_deref() == Some(battlesnake::DISABLED_REASON_RETIRED) {
+                                                span class="badge" { "Retired" }
+                                            } @else if entry.disabled_at.is_some()
+                                                && entry.disabled_reason.as_deref() == Some(leaderboard_registration::DISABLED_REASON_HEALTH)
                                             {
                                                 span class="badge warn" title="Automatically paused: this snake is failing health checks on this leaderboard." { "Auto-paused" }
                                             } @else if entry.disabled_at.is_some() {
@@ -1578,7 +1753,7 @@ pub async fn view_battlesnake_profile(
             .wrap_err("Failed to get leaderboard entries")?;
 
     // Health-sweeper pauses, for the owner-facing deactivation banner
-    let health_paused = leaderboard_entry_health::health_paused_entries(&state.db, battlesnake_id)
+    let health_paused = leaderboard_registration::health_paused_leagues(&state.db, battlesnake_id)
         .await
         .wrap_err("Failed to get health-paused entries")?;
 
@@ -1887,9 +2062,11 @@ mod form_tests {
             visibility: Visibility::Private,
             engine_region: EngineRegion::UsEast4,
             tag_ids: tag_ids.clone(),
+            allow_tournament_import: false,
         };
 
         let bounded = bounded_form_copy(&form);
+        assert!(!bounded.allow_tournament_import);
 
         assert_eq!(bounded.name.chars().count(), battlesnake::MAX_NAME_LEN);
         assert_eq!(bounded.url.chars().count(), MAX_DRAFT_URL_CHARS);
@@ -1935,6 +2112,25 @@ mod form_tests {
             r#"{"name":"Example","url":"https://example.com","visibility":"public","tag_ids":[]}"#;
         let form: BattlesnakeFormData = serde_json::from_str(old).unwrap();
         assert_eq!(form.engine_region, EngineRegion::UsWest1);
+        assert!(form.allow_tournament_import);
+    }
+
+    #[test]
+    fn tournament_import_checkbox_is_opt_out() {
+        let base =
+            "name=Example&url=https%3A%2F%2Fexample.com&visibility=public&engine_region=us-west1";
+        assert!(
+            !parse_battlesnake_form(base.as_bytes())
+                .unwrap()
+                .allow_tournament_import
+        );
+        let checked = format!("{base}&allow_tournament_import=on");
+        assert!(
+            parse_battlesnake_form(checked.as_bytes())
+                .unwrap()
+                .allow_tournament_import
+        );
+        assert!(BattlesnakeFormData::default().allow_tournament_import);
     }
 }
 
@@ -1950,6 +2146,7 @@ mod public_list_tests {
             color: "#ff0000".to_string(),
             owner_login: owner.to_string(),
             owner_name: owner.to_string(),
+            retired_at: None,
         }
     }
 
@@ -2019,6 +2216,17 @@ mod public_list_tests {
     }
 
     #[test]
+    fn retired_public_row_keeps_profile_but_hides_challenge() {
+        let mut snake = item("Veteran", "owner");
+        snake.retired_at = Some(chrono::Utc::now());
+        let html = render_public_battlesnake_list(&[snake], true, "", 0, 1, 1).into_string();
+        assert!(html.contains("Veteran"));
+        assert!(html.contains("Retired"));
+        assert!(!html.contains("/challenge"));
+        assert!(!html.contains("Sign in to challenge"));
+    }
+
+    #[test]
     fn middle_page_renders_both_prev_and_next_links() {
         let html = render_public_battlesnake_list(&[item("Middle", "owner")], true, "", 1, 3, 120)
             .into_string();
@@ -2031,8 +2239,8 @@ mod public_list_tests {
 
     async fn seed_public_snakes(pool: &PgPool, count: usize) -> cja::Result<Uuid> {
         let user = sqlx::query!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (9001, 'loader-owner', 'test-token')
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (9001, 'loader-owner')
              RETURNING user_id"
         )
         .fetch_one(pool)
@@ -2144,8 +2352,8 @@ mod deleted_snake_route_tests {
 
     async fn owner_with_snake(pool: &PgPool, github_id: i64, name: &str) -> (Uuid, Uuid) {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(github_id)
         .bind(format!("route-owner-{github_id}"))
@@ -2174,14 +2382,15 @@ mod deleted_snake_route_tests {
         .await
         .unwrap();
         let entry_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-             VALUES ($1, $2) RETURNING leaderboard_entry_id",
+            "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+             VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2) RETURNING leaderboard_entry_id",
         )
         .bind(leaderboard_id)
         .bind(snake)
         .fetch_one(&pool)
         .await
         .unwrap();
+        crate::routes::test_support::register_snake_entries(&pool, snake).await;
         assert_eq!(
             battlesnake::delete_battlesnake(&pool, snake, owner)
                 .await
@@ -2340,7 +2549,7 @@ mod profile_page_tests {
             (status, String::from_utf8(body.to_vec()).unwrap())
         }
 
-        async fn post(&self, session: Uuid, action: &str) -> (StatusCode, String) {
+        async fn post_response(&self, session: Uuid, action: &str) -> axum::response::Response {
             let request = Request::builder()
                 .method(axum::http::Method::POST)
                 .uri(format!("/battlesnakes/{}/{action}", self.snake_id))
@@ -2354,7 +2563,11 @@ mod profile_page_tests {
                 )
                 .body(Body::empty())
                 .unwrap();
-            let response = self.app.clone().oneshot(request).await.unwrap();
+            self.app.clone().oneshot(request).await.unwrap()
+        }
+
+        async fn post(&self, session: Uuid, action: &str) -> (StatusCode, String) {
+            let response = self.post_response(session, action).await;
             let status = response.status();
             let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
             (status, String::from_utf8(body.to_vec()).unwrap())
@@ -2363,16 +2576,253 @@ mod profile_page_tests {
         async fn deactivate(&self) {
             sqlx::query(
                 "INSERT INTO leaderboard_entries
-                     (leaderboard_id, battlesnake_id, disabled_at, disabled_reason,
+                     (leaderboard_id, season_id, battlesnake_id, disabled_at, disabled_reason,
                       health_consecutive_failures, health_last_failure)
-                 SELECT leaderboard_id, $1, NOW(), 'health', 4, 'POST /move timed out'
+                 SELECT leaderboard_id,
+                        (SELECT season_id FROM leaderboard_seasons s WHERE s.leaderboard_id = leaderboards.leaderboard_id),
+                        $1, NOW(), 'health', 4, 'POST /move timed out'
                  FROM leaderboards ORDER BY created_at, leaderboard_id LIMIT 1",
             )
             .bind(self.snake_id)
             .execute(&self.db)
             .await
             .unwrap();
+            crate::routes::test_support::register_snake_entries(&self.db, self.snake_id).await;
         }
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn retire_routes_enforce_owner_and_preserve_profile(db: PgPool) {
+        let fx = Fixture::new(db, "public").await;
+        let path = format!("/battlesnakes/{}/profile", fx.snake_id);
+        let before = fx.get(Some(fx.owner_session)).await.1;
+        assert!(
+            before.contains("Registrations in unopened tournaments will be withdrawn"),
+            "{before}"
+        );
+
+        let visitor = fx.post_response(fx.visitor_session, "retire").await;
+        assert_eq!(visitor.status(), StatusCode::FORBIDDEN);
+        let retired_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT retired_at FROM battlesnakes WHERE battlesnake_id = $1")
+                .bind(fx.snake_id)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert!(retired_at.is_none());
+
+        let owner = fx.post_response(fx.owner_session, "retire").await;
+        assert_eq!(owner.status(), StatusCode::SEE_OTHER);
+        assert_eq!(owner.headers()[header::LOCATION], path);
+        let retired_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT retired_at FROM battlesnakes WHERE battlesnake_id = $1")
+                .bind(fx.snake_id)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert!(retired_at.is_some());
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert_eq!(flash, "Enjoy the retirement!");
+        let (status, profile) = fx.get(Some(fx.visitor_session)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(profile.contains("Hung up its fangs on "), "{profile}");
+        assert!(
+            profile.contains(
+                "Retired</strong> from competition, legacy intact: stats and ratings live on."
+            ),
+            "{profile}"
+        );
+        assert!(profile.contains("No games played yet."));
+        assert!(!profile.contains(challenge_form(fx.snake_id).as_str()));
+
+        let reactivate = fx.post_response(fx.owner_session, "reactivate").await;
+        assert_eq!(reactivate.status(), StatusCode::SEE_OTHER);
+        assert_eq!(reactivate.headers()[header::LOCATION], path);
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert_eq!(flash, "This battlesnake is retired — unretire it first.");
+
+        let visitor = fx.post_response(fx.visitor_session, "unretire").await;
+        assert_eq!(visitor.status(), StatusCode::FORBIDDEN);
+        let restored = fx.post_response(fx.owner_session, "unretire").await;
+        assert_eq!(restored.status(), StatusCode::SEE_OTHER);
+        assert_eq!(restored.headers()[header::LOCATION], path);
+        let retired_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT retired_at FROM battlesnakes WHERE battlesnake_id = $1")
+                .bind(fx.snake_id)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert!(retired_at.is_none());
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert_eq!(flash, "Out of retirement and hungry 🐍");
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn retire_route_reports_tournament_block_and_withdrawal(db: PgPool) {
+        let fx = Fixture::new(db, "public").await;
+        let owner = session_user_id(&fx.db, fx.owner_session).await;
+        let tournament_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO tournaments (name, user_id, status) VALUES ('Active Route', $1, 'registration') RETURNING tournament_id",
+        )
+        .bind(owner)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO tournament_registrations (tournament_id, battlesnake_id, user_id, seed) VALUES ($1, $2, $3, 1)",
+        )
+        .bind(tournament_id)
+        .bind(fx.snake_id)
+        .bind(owner)
+        .execute(&fx.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            fx.post_response(fx.owner_session, "retire").await.status(),
+            StatusCode::SEE_OTHER
+        );
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert!(flash.contains("Withdraw it first."));
+        let retired: bool = sqlx::query_scalar(
+            "SELECT retired_at IS NOT NULL FROM battlesnakes WHERE battlesnake_id = $1",
+        )
+        .bind(fx.snake_id)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        assert!(!retired);
+
+        sqlx::query("UPDATE tournaments SET status = 'created' WHERE tournament_id = $1")
+            .bind(tournament_id)
+            .execute(&fx.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            fx.post_response(fx.owner_session, "retire").await.status(),
+            StatusCode::SEE_OTHER
+        );
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert_eq!(
+            flash,
+            "Enjoy the retirement! Withdrawn from 1 unopened tournament registration(s); unretiring will not restore them."
+        );
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tournament_registrations WHERE tournament_id = $1",
+        )
+        .bind(tournament_id)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn retired_snake_web_join_and_registration_show_clear_flashes(db: PgPool) {
+        let fx = Fixture::new(db, "public").await;
+        let owner = session_user_id(&fx.db, fx.owner_session).await;
+        assert_eq!(
+            fx.post_response(fx.owner_session, "retire").await.status(),
+            StatusCode::SEE_OTHER
+        );
+        let cookie = format!(
+            "{}={}",
+            session::SESSION_COOKIE_NAME,
+            signed_session_cookie(&fx.state, fx.owner_session)
+        );
+        let leaderboard_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboards (name) VALUES ('Retired Route Join') RETURNING leaderboard_id",
+        )
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        let join = Request::builder()
+            .method(axum::http::Method::POST)
+            .uri(format!("/leaderboards/{leaderboard_id}/join"))
+            .header(header::COOKIE, &cookie)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(format!("battlesnake_id={}", fx.snake_id)))
+            .unwrap();
+        let response = fx.app.clone().oneshot(join).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert_eq!(
+            flash,
+            "This battlesnake is retired — unretire it before joining."
+        );
+        let entries: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM leaderboard_entries WHERE leaderboard_id = $1 AND battlesnake_id = $2",
+        )
+        .bind(leaderboard_id)
+        .bind(fx.snake_id)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        assert_eq!(entries, 0);
+
+        let tournament_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO tournaments (name, user_id, status) VALUES ('Retired Route Tournament', $1, 'registration') RETURNING tournament_id",
+        )
+        .bind(owner)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        let register = Request::builder()
+            .method(axum::http::Method::POST)
+            .uri(format!("/tournaments/{tournament_id}/register"))
+            .header(header::COOKIE, &cookie)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(format!("battlesnake_id={}", fx.snake_id)))
+            .unwrap();
+        let response = fx.app.clone().oneshot(register).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert_eq!(
+            flash,
+            "This battlesnake is retired — unretire it before registering."
+        );
+        let registrations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tournament_registrations WHERE tournament_id = $1",
+        )
+        .bind(tournament_id)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        assert_eq!(registrations, 0);
     }
 
     /// Test Snake plays one game per active public leaderboard — enrolled or
@@ -2438,13 +2888,15 @@ mod profile_page_tests {
             .unwrap();
         }
         sqlx::query(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-             SELECT leaderboard_id, $1 FROM leaderboards WHERE name = 'Joined Private'",
+            "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+             SELECT leaderboard_id, (SELECT season_id FROM leaderboard_seasons s WHERE s.leaderboard_id = leaderboards.leaderboard_id), $1
+             FROM leaderboards WHERE name = 'Joined Private'",
         )
         .bind(fx.snake_id)
         .execute(&fx.db)
         .await
         .unwrap();
+        crate::routes::test_support::register_snake_entries(&fx.db, fx.snake_id).await;
 
         let (status, _) = fx.post(fx.visitor_session, "test").await;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -2487,14 +2939,16 @@ mod profile_page_tests {
         assert!(empty.contains("No games played yet."));
         assert!(!empty.contains("class=\"pager\""));
         let entry_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, games_played)
-             SELECT leaderboard_id, $1, 7 FROM leaderboards ORDER BY created_at LIMIT 1
+            "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id, games_played)
+             SELECT leaderboard_id, (SELECT season_id FROM leaderboard_seasons s WHERE s.leaderboard_id = leaderboards.leaderboard_id), $1, 7
+             FROM leaderboards ORDER BY created_at LIMIT 1
              RETURNING leaderboard_entry_id",
         )
         .bind(fx.snake_id)
         .fetch_one(&fx.db)
         .await
         .unwrap();
+        crate::routes::test_support::register_snake_entries(&fx.db, fx.snake_id).await;
         sqlx::query(
             "INSERT INTO games (game_id, board_size, game_type, status, created_at)
              SELECT md5('profile-route-' || n)::uuid, '11x11', 'Standard', 'finished',
@@ -2548,6 +3002,50 @@ mod profile_page_tests {
                 assert!(html.contains("‹ Prev"));
                 assert!(!html.contains("Next ›"));
             }
+        }
+
+        // Exercise the populated history through the owner action, for both
+        // viewers and both pages. A retired-only filter in the profile query
+        // must not turn this into an apparently valid empty profile.
+        let history_section = |html: &str| {
+            html.split("Game History")
+                .nth(1)
+                .unwrap()
+                .split("</section>")
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        let before_pages = [
+            fx.get_page(Some(fx.owner_session), None).await.1,
+            fx.get_page(Some(fx.owner_session), Some(1)).await.1,
+            fx.get_page(Some(fx.visitor_session), None).await.1,
+            fx.get_page(Some(fx.visitor_session), Some(1)).await.1,
+        ];
+        let response = fx.post_response(fx.owner_session, "retire").await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        for (index, (viewer, page)) in [
+            (fx.owner_session, None),
+            (fx.owner_session, Some(1)),
+            (fx.visitor_session, None),
+            (fx.visitor_session, Some(1)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (status, retired) = fx.get_page(Some(viewer), page).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(retired.contains("Hung up its fangs on "));
+            assert!(retired.contains(
+                "Retired</strong> from competition, legacy intact: stats and ratings live on."
+            ));
+            assert!(retired.contains("53<small>2 won</small>"));
+            assert!(retired.contains("Avg. Placement</div><div class=\"value\">2.0</div>"));
+            assert!(retired.contains("<td class=\"r num\">7</td>"));
+            assert!(!retired.contains("No games played yet."));
+            let history = history_section(&retired);
+            assert_eq!(history, history_section(&before_pages[index]));
+            assert!(history.contains("🥇 1st") || history.contains("🥈 2nd"));
         }
     }
 
@@ -2679,8 +3177,9 @@ mod profile_page_tests {
         .unwrap();
         let game_battlesnake_id: Uuid = sqlx::query_scalar(
             "WITH entry AS (
-                 INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-                 SELECT leaderboard_id, $2 FROM leaderboards ORDER BY created_at LIMIT 1
+                 INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+                 SELECT leaderboard_id, (SELECT season_id FROM leaderboard_seasons s WHERE s.leaderboard_id = leaderboards.leaderboard_id), $2
+                 FROM leaderboards ORDER BY created_at LIMIT 1
                  RETURNING leaderboard_entry_id
              )
              INSERT INTO game_battlesnakes (game_id, leaderboard_entry_id)
@@ -2692,6 +3191,7 @@ mod profile_page_tests {
         .fetch_one(&fx.db)
         .await
         .unwrap();
+        crate::routes::test_support::register_snake_entries(&fx.db, fx.snake_id).await;
         for (turn, latency) in [(0, Some(40)), (1, Some(60)), (2, None)] {
             let turn_id: Uuid = sqlx::query_scalar(
                 "INSERT INTO turns (game_id, turn_number) VALUES ($1, $2) RETURNING turn_id",
@@ -2777,8 +3277,8 @@ mod hosting_route_tests {
         url: &str,
     ) -> (Uuid, Uuid) {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(github_id)
         .bind(format!("hosting-owner-{github_id}"))
@@ -2996,6 +3496,89 @@ mod hosting_route_tests {
         assert_eq!(status, StatusCode::SEE_OTHER);
         assert_eq!(hosted_mark(&pool, snake).await, Some(client));
     }
+
+    /// The edit form round-trips the tournament-import opt-out: unchecking
+    /// stores false and renders unchecked; checking it restores true.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn web_update_round_trips_tournament_import_opt_out(pool: PgPool) {
+        let state = AppState::test_from_pool(pool.clone());
+        let app = app(&state);
+        let session = crate::routes::test_support::create_user_session(&pool, 9305, false).await;
+        let user = crate::routes::test_support::session_user_id(&pool, session).await;
+        let cookie = format!(
+            "{}={}",
+            crate::models::session::SESSION_COOKIE_NAME,
+            crate::routes::test_support::signed_session_cookie(&state, session)
+        );
+        let snake: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'Import Pref Snake', 'https://pref.example/s') RETURNING battlesnake_id",
+        )
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let checked =
+            r#"id="allow_tournament_import" name="allow_tournament_import" value="on" checked"#;
+
+        let (status, body) = send(
+            &app,
+            Method::GET,
+            &format!("/battlesnakes/{snake}/edit"),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains(checked),
+            "new snakes default to allowed: {body}"
+        );
+
+        let base = "name=Import+Pref+Snake&url=https://pref.example/s&visibility=public&engine_region=us-west1";
+        let (status, _) = send(
+            &app,
+            Method::POST,
+            &format!("/battlesnakes/{snake}/update"),
+            Some(&cookie),
+            Some(base.to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert!(
+            !battlesnake::get_battlesnake_by_id(&pool, snake)
+                .await
+                .unwrap()
+                .unwrap()
+                .allow_tournament_import
+        );
+        let (_, body) = send(
+            &app,
+            Method::GET,
+            &format!("/battlesnakes/{snake}/edit"),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert!(body.contains(r#"id="allow_tournament_import""#), "{body}");
+        assert!(!body.contains(checked), "{body}");
+
+        let (status, _) = send(
+            &app,
+            Method::POST,
+            &format!("/battlesnakes/{snake}/update"),
+            Some(&cookie),
+            Some(format!("{base}&allow_tournament_import=on")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert!(
+            battlesnake::get_battlesnake_by_id(&pool, snake)
+                .await
+                .unwrap()
+                .unwrap()
+                .allow_tournament_import
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3066,6 +3649,7 @@ mod creation_event_tests {
 
         let events = capture.events("battlesnake_created", user_id);
         assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["snake_name"], "Web Event Snake");
         assert_eq!(
             events[0].get("battlesnake_id").map(String::as_str),
             Some(snake_id.to_string().as_str()),

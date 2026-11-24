@@ -1,0 +1,107 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT g.game_id, g.game_type, bs.user_id, bs.name AS snake_name, gb.placement, gb.leaderboard_entry_id,\n            COALESCE(gb.battlesnake_id, le.battlesnake_id) AS \"snake_id!\",\n            (SELECT COUNT(*) FROM game_battlesnakes peer WHERE peer.game_id = g.game_id) AS \"participants!\",\n            (SELECT COUNT(*) FROM game_battlesnakes peer WHERE peer.game_id = g.game_id AND peer.placement = 1) AS \"first_places!\"\n        FROM games g\n        JOIN game_battlesnakes gb ON gb.game_id = g.game_id\n        LEFT JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id\n        JOIN battlesnakes bs ON bs.battlesnake_id = COALESCE(gb.battlesnake_id, le.battlesnake_id)\n        WHERE g.status = 'finished' AND g.finished_at IS NOT NULL\n          AND g.finished_at > NOW() - INTERVAL '2 hours'\n        ORDER BY g.finished_at, g.game_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "games",
+            "name": "game_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "game_type",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "games",
+            "name": "game_type"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "user_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "snake_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "placement",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "game_battlesnakes",
+            "name": "placement"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "game_battlesnakes",
+            "name": "leaderboard_entry_id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "snake_id!",
+        "type_info": "Uuid",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "participants!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
+        "name": "first_places!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "c5c471bf52ca231b74f0c16acef3971f7f8ab4df4818fdb611e7383acbccea25"
+}

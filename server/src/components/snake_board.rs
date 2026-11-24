@@ -522,15 +522,19 @@ pub const FOUR_DIRECTIONS_SIZE: (i32, i32) = (7, 5);
 
 /// Four snakes whose heads face right, left, up and down, and whose tails
 /// point down, up, left and right: every head and tail transform on one board.
-/// Verified against the real board's renderer.
+/// The transforms are verified against the real board's renderer.
+///
+/// Placed off-balance on purpose: four bent snakes spaced evenly around a point
+/// read as one pinwheel shape instead of four snakes, so a test keeps the layout
+/// from having rotational symmetry.
 pub const FOUR_DIRECTIONS_SNAKES: [[Cell; 4]; 4] = [
-    [(2, 4), (1, 4), (0, 4), (0, 3)],
+    [(3, 1), (2, 1), (1, 1), (1, 0)],
     [(4, 0), (5, 0), (6, 0), (6, 1)],
     [(5, 4), (5, 3), (5, 2), (4, 2)],
-    [(1, 0), (1, 1), (1, 2), (2, 2)],
+    [(0, 2), (0, 3), (0, 4), (1, 4)],
 ];
 
-pub const FOUR_DIRECTIONS_FOOD: Cell = (3, 2);
+pub const FOUR_DIRECTIONS_FOOD: Cell = (3, 4);
 
 /// Size of the "Live" board.
 pub const LIVE_LOOP_SIZE: (i32, i32) = (7, 7);
@@ -1087,6 +1091,54 @@ mod tests {
         }
         assert!(!used.contains(&FOUR_DIRECTIONS_FOOD));
         assert!(in_bounds(FOUR_DIRECTIONS_SIZE, FOUR_DIRECTIONS_FOOD));
+    }
+
+    /// The most of `cells`, as a percentage, that a half or quarter turn about any
+    /// centre lands back on `cells`.
+    fn rotational_overlap_pct(cells: &HashSet<Cell>) -> usize {
+        // Doubled coordinates, so a centre can fall between cells.
+        let doubled: HashSet<Cell> = cells.iter().map(|&(x, y)| (2 * x, 2 * y)).collect();
+        let (width, height) = FOUR_DIRECTIONS_SIZE;
+        let mut best = 0;
+        for cx in -2..=2 * width + 2 {
+            for cy in -2..=2 * height + 2 {
+                let half = doubled
+                    .iter()
+                    .filter(|&&(x, y)| doubled.contains(&(2 * cx - x, 2 * cy - y)))
+                    .count();
+                let quarter = doubled
+                    .iter()
+                    .filter(|&&(x, y)| doubled.contains(&(cx - (y - cy), cy + (x - cx))))
+                    .count();
+                best = best.max(half).max(quarter);
+            }
+        }
+        best * 100 / cells.len()
+    }
+
+    fn layout_cells(snakes: &[[Cell; 4]; 4], food: Cell) -> HashSet<Cell> {
+        snakes.iter().flatten().copied().chain([food]).collect()
+    }
+
+    #[test]
+    fn four_directions_is_not_a_pinwheel() {
+        const MAX_OVERLAP_PCT: usize = 75;
+
+        // Control: four bent arms evenly around the food, which this must catch.
+        let pinwheel = [
+            [(2, 4), (1, 4), (0, 4), (0, 3)],
+            [(4, 0), (5, 0), (6, 0), (6, 1)],
+            [(5, 4), (5, 3), (5, 2), (4, 2)],
+            [(1, 0), (1, 1), (1, 2), (2, 2)],
+        ];
+        assert!(rotational_overlap_pct(&layout_cells(&pinwheel, (3, 2))) > MAX_OVERLAP_PCT);
+
+        let overlap =
+            rotational_overlap_pct(&layout_cells(&FOUR_DIRECTIONS_SNAKES, FOUR_DIRECTIONS_FOOD));
+        assert!(
+            overlap <= MAX_OVERLAP_PCT,
+            "a rotation maps {overlap}% of the layout onto itself"
+        );
     }
 
     #[test]

@@ -28,9 +28,13 @@ pub struct SnakeResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     url: Option<String>,
     is_public: bool,
+    /// Whether other users' tournaments may import this snake from a
+    /// leaderboard (only applies while the snake is public).
+    allow_tournament_import: bool,
     engine_region: EngineRegion,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
+    retired_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl SnakeResponse {
@@ -47,9 +51,11 @@ impl SnakeResponse {
             name: snake.name,
             url,
             is_public: snake.visibility == Visibility::Public,
+            allow_tournament_import: snake.allow_tournament_import,
             engine_region: snake.engine_region,
             created_at: snake.created_at,
             updated_at: snake.updated_at,
+            retired_at: snake.retired_at,
         }
     }
 }
@@ -61,8 +67,15 @@ pub struct CreateSnakeRequest {
     pub url: String,
     #[serde(default)]
     pub is_public: bool,
+    /// Defaults to allowed, matching the web form and the column default.
+    #[serde(default = "default_allow_tournament_import")]
+    pub allow_tournament_import: bool,
     #[serde(default, deserialize_with = "deserialize_present_region")]
     pub engine_region: Option<serde_json::Value>,
+}
+
+fn default_allow_tournament_import() -> bool {
+    true
 }
 
 /// Request body for updating a snake
@@ -71,6 +84,7 @@ pub struct UpdateSnakeRequest {
     pub name: Option<String>,
     pub url: Option<String>,
     pub is_public: Option<bool>,
+    pub allow_tournament_import: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_present_region")]
     pub engine_region: Option<serde_json::Value>,
 }
@@ -170,6 +184,7 @@ pub async fn create_snake(
         } else {
             Visibility::Private
         },
+        allow_tournament_import: request.allow_tournament_import,
     };
 
     // A snake created through a `selected` token joins that token's list in
@@ -236,12 +251,15 @@ pub async fn create_snake(
         )
     })?;
 
-    tracing::info!(
-        event_type = "battlesnake_created",
-        battlesnake_id = %snake.battlesnake_id,
-        user_id = %auth.user_id,
-        source = "api",
-        "battlesnake created"
+    cja::product_event!(
+        name: "battlesnake_created",
+        user_id: Some(&auth.user_id),
+        message: "battlesnake created",
+        properties: {
+            battlesnake_id = %snake.battlesnake_id,
+            snake_name = %snake.name,
+            source = "api",
+        }
     );
 
     // The scope was loaded at auth time; mirror the row just committed so
@@ -299,8 +317,10 @@ pub async fn update_snake(
     // `snake.edit` gate so a zero-scope credential can neither probe nor
     // no-op-write a snake outside its reach.
     let touches_url = request.url.is_some();
-    let touches_edit =
-        request.name.is_some() || request.is_public.is_some() || request.engine_region.is_some();
+    let touches_edit = request.name.is_some()
+        || request.is_public.is_some()
+        || request.allow_tournament_import.is_some()
+        || request.engine_region.is_some();
     if touches_url {
         auth.require_snake(snake_id, Permission::SnakeUrlWrite)?;
     }
@@ -384,6 +404,7 @@ pub async fn update_snake(
         url: new_url,
         engine_region,
         visibility: new_visibility,
+        allow_tournament_import: request.allow_tournament_import,
     };
 
     let snake = battlesnake::update_battlesnake(&state.db, snake_id, auth.user_id, update_data)
@@ -575,6 +596,7 @@ mod tests {
                 url: format!("https://{name}.example"),
                 visibility: Visibility::Private,
                 engine_region: Default::default(),
+                allow_tournament_import: true,
             },
         )
         .await
@@ -604,6 +626,34 @@ mod tests {
         let (status, body) = send_api(app, method, path, Some(bearer), body).await;
         let json = serde_json::from_str(&body).unwrap_or(serde_json::Value::String(body));
         (status, json)
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn retired_at_is_nullable_in_owner_api_without_exposing_url(db: PgPool) {
+        let state = AppState::test_from_pool(db.clone());
+        let app = api_app(&state);
+        let user = create_user(&db, 262040, false).await;
+        let snake = make_snake(&db, user, "api-retirement").await;
+        let token = mint(&db, user, &[Permission::SnakesRead], SnakeAccess::All, &[]).await;
+        let path = format!("/api/snakes/{}", snake.battlesnake_id);
+        let (status, before) = request(&app, "GET", &path, &token, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(before["retired_at"].is_null());
+        assert!(before.get("url").is_none());
+        battlesnake::retire_battlesnake(&db, snake.battlesnake_id, user)
+            .await
+            .unwrap();
+        let (status, retired) = request(&app, "GET", &path, &token, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(retired["retired_at"].as_str().is_some());
+        assert!(retired.get("url").is_none());
+        battlesnake::unretire_battlesnake(&db, snake.battlesnake_id, user)
+            .await
+            .unwrap();
+        let (status, restored) = request(&app, "GET", &path, &token, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(restored["retired_at"].is_null());
+        assert!(restored.get("url").is_none());
     }
 
     #[sqlx::test(migrations = "../migrations")]
@@ -871,6 +921,116 @@ mod tests {
             serde_json::to_value(SnakeResponse::new(&ApiAuth::session(owner), fetch().await))
                 .unwrap();
         assert_eq!(json["url"], "https://someone-elses.example");
+    }
+
+    /// `allow_tournament_import` defaults to true on create, can be set on
+    /// create, round-trips through PUT under `snake.edit`, and a PUT that
+    /// omits it keeps the stored value.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn allow_tournament_import_round_trips_through_api(db: PgPool) {
+        let state = AppState::test_from_pool(db.clone());
+        let app = api_app(&state);
+        let user = create_user(&db, 9921920, false).await;
+        let token = mint(
+            &db,
+            user,
+            &[
+                Permission::SnakesCreate,
+                Permission::SnakesRead,
+                Permission::SnakeEdit,
+            ],
+            SnakeAccess::All,
+            &[],
+        )
+        .await;
+
+        let (status, json) = request(
+            &app,
+            "POST",
+            "/api/snakes",
+            &token,
+            Some(serde_json::json!({"name": "import-default", "url": "https://a.example"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{json}");
+        assert_eq!(json["allow_tournament_import"], true, "{json}");
+
+        let (status, json) = request(
+            &app,
+            "POST",
+            "/api/snakes",
+            &token,
+            Some(serde_json::json!({
+                "name": "import-off",
+                "url": "https://b.example",
+                "allow_tournament_import": false,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{json}");
+        assert_eq!(json["allow_tournament_import"], false, "{json}");
+        let path = format!("/api/snakes/{}", json["id"].as_str().unwrap());
+
+        let (status, json) = request(
+            &app,
+            "PUT",
+            &path,
+            &token,
+            Some(serde_json::json!({"allow_tournament_import": true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["allow_tournament_import"], true, "{json}");
+
+        let (status, json) = request(
+            &app,
+            "PUT",
+            &path,
+            &token,
+            Some(serde_json::json!({"name": "import-renamed"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["allow_tournament_import"], true, "{json}");
+
+        let (status, json) = request(&app, "GET", &path, &token, None).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["allow_tournament_import"], true, "{json}");
+    }
+
+    /// Toggling the import setting is a `snake.edit` action: a token with
+    /// only `snake.url.write` can't flip it.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn allow_tournament_import_put_requires_snake_edit(db: PgPool) {
+        let state = AppState::test_from_pool(db.clone());
+        let app = api_app(&state);
+        let user = create_user(&db, 9921921, false).await;
+        let snake = make_snake(&db, user, "import-perm").await;
+        let token = mint(
+            &db,
+            user,
+            &[Permission::SnakeUrlWrite],
+            SnakeAccess::All,
+            &[],
+        )
+        .await;
+        let (status, body) = send_api(
+            &app,
+            "PUT",
+            &format!("/api/snakes/{}", snake.battlesnake_id),
+            Some(&token),
+            Some(serde_json::json!({"allow_tournament_import": false})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, "missing permission: snake.edit");
+        assert!(
+            battlesnake::get_battlesnake_by_id(&db, snake.battlesnake_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .allow_tournament_import
+        );
     }
 
     #[sqlx::test(migrations = "../migrations")]
@@ -1284,6 +1444,7 @@ mod tests {
                 url: url.to_string(),
                 visibility: Visibility::Private,
                 engine_region: Default::default(),
+                allow_tournament_import: true,
             },
         )
         .await
@@ -1705,6 +1866,7 @@ mod tests {
 
         let events = capture.events("battlesnake_created", user);
         assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["snake_name"], "api-event-snake");
         assert_eq!(
             events[0].get("battlesnake_id").map(String::as_str),
             Some(created.to_string().as_str()),

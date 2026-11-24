@@ -286,8 +286,8 @@ async fn poll_batch(
         #[cfg(test)]
         watched.stats.status_reads.fetch_add(1, Ordering::Relaxed);
         Some(sqlx::query!(
-            r#"SELECT g.game_id, g.status, (SELECT MAX(t.turn_number) FROM turns t WHERE t.game_id = g.game_id) AS latest_turn,
-                      c.turn_id AS cursor_turn_id
+            r#"SELECT g.game_id AS "game_id!", g.status AS "status!", (SELECT MAX(t.turn_number) FROM turns t WHERE t.game_id = g.game_id) AS latest_turn,
+                      c.turn_id AS "cursor_turn_id?"
                FROM unnest($1::uuid[], $2::int[]) AS w(game_id, last_turn)
                JOIN games g ON g.game_id = w.game_id
                LEFT JOIN turns c ON c.game_id = w.game_id AND c.turn_number = w.last_turn"#,
@@ -381,7 +381,7 @@ async fn poll_batch(
         }
         let Some(row) = row else { continue };
         match GameStatus::from_str(&row.status) {
-            Ok(status @ (GameStatus::Finished | GameStatus::Failed)) => {
+            Ok(status) if status.is_terminal() => {
                 let _ = entry.updates.send(WatchedGameUpdate::Terminal(status));
                 entry.readiness.send_replace(Readiness::Retired);
                 registry.entries.remove(&id);
@@ -699,8 +699,8 @@ mod tests {
             .unwrap();
             let login = format!("prune-notify-{}", Uuid::new_v4().simple());
             let user_id: Uuid = sqlx::query_scalar(
-                "INSERT INTO users (external_github_id, github_login, github_access_token)
-                 VALUES ($1, $2, '') RETURNING user_id",
+                "INSERT INTO users (external_github_id, github_login)
+                 VALUES ($1, $2) RETURNING user_id",
             )
             .bind(Uuid::new_v4().as_u128() as i64)
             .bind(&login)

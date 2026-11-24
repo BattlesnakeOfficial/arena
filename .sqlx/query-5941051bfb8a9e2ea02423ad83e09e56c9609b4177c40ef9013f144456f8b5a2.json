@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)\n         SELECT $1, $2, b.battlesnake_id\n         FROM leaderboard_registrations r\n         JOIN battlesnakes b ON b.battlesnake_id = r.battlesnake_id\n         WHERE r.leaderboard_id = $1\n           AND r.disabled_at IS NULL\n           AND b.deleted_at IS NULL AND b.retired_at IS NULL\n         ON CONFLICT (season_id, battlesnake_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5941051bfb8a9e2ea02423ad83e09e56c9609b4177c40ef9013f144456f8b5a2"
+}

@@ -5,7 +5,7 @@
 //! (`design_kit::catalog_shapes`); an unknown slug is drawn as the default.
 
 use arena::design_kit::{
-    AssetKind, FillRule,
+    AssetKind, FillRule, catalog_layers,
     catalog_shapes::{self, CatalogShape},
 };
 use svgtypes::{SimplePathSegment, SimplifyingPathParser};
@@ -13,7 +13,9 @@ use tiny_skia::{
     Color, FillRule as SkiaFillRule, LineCap, LineJoin, Path, PathBuilder, Stroke, Transform,
 };
 
-use super::canvas::{Canvas, palette, round_rect, shaded, solid, vertical_gradient, with_alpha};
+use super::canvas::{
+    Canvas, palette, parse_hex, round_rect, shaded, solid, vertical_gradient, with_alpha,
+};
 use crate::components::snake_board::{Board, CELL, Cell, Direction, Placement};
 use crate::customizations::{DEFAULT_SLUG, Head, Tail};
 
@@ -40,10 +42,21 @@ fn media_file(url: &str) -> Option<&str> {
     url.rsplit('/').next()?.strip_suffix(".svg")
 }
 
+/// The fixed-colour layers painted over a catalog shape's base path
+/// (multi-colour special art; single-colour art has none).
+pub fn layers(shape: &CatalogShape) -> &'static [catalog_layers::CatalogLayer] {
+    catalog_layers::find(shape.kind, shape.file)
+}
+
 /// A catalog shape's path, in its 100×100 box.
 pub(super) fn shape_path(shape: &CatalogShape) -> Option<Path> {
+    path_from_d(shape.d)
+}
+
+/// Absolute `M`/`L`/`Q`/`C`/`Z` commands as a tiny-skia path.
+fn path_from_d(d: &str) -> Option<Path> {
     let mut pb = PathBuilder::new();
-    for segment in SimplifyingPathParser::from(shape.d) {
+    for segment in SimplifyingPathParser::from(d) {
         match segment.ok()? {
             SimplePathSegment::MoveTo { x, y } => pb.move_to(x as f32, y as f32),
             SimplePathSegment::LineTo { x, y } => pb.line_to(x as f32, y as f32),
@@ -156,6 +169,20 @@ const HALO_ALPHA: f32 = 0.4;
 
 pub fn is_dark(color: Color) -> bool {
     0.2126 * color.red() + 0.7152 * color.green() + 0.0722 * color.blue() < DARK_LUMINANCE
+}
+
+/// `is_dark` for a normalized `#rrggbb` hex (as `normalize_color` returns).
+/// Used by the HTML `snake_avatar` component; near-black declared colours
+/// get a faint light outline on the dark theme.
+pub fn is_dark_hex(hex: &str) -> bool {
+    let Some(h) = hex.strip_prefix('#').filter(|h| h.len() == 6) else {
+        return false;
+    };
+    let chan = |range: std::ops::Range<usize>| u8::from_str_radix(&h[range], 16).ok();
+    match (chan(0..2), chan(2..4), chan(4..6)) {
+        (Some(r), Some(g), Some(b)) => is_dark(Color::from_rgba8(r, g, b, 255)),
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -287,7 +314,12 @@ impl Canvas {
                 .pre_translate(at.x as f32, at.y as f32)
                 .pre_scale(scale, scale)
                 .pre_concat(dir);
-            Some((shape_path(shape)?, fill_rule(shape.fill_rule), transform))
+            Some((
+                shape,
+                shape_path(shape)?,
+                fill_rule(shape.fill_rule),
+                transform,
+            ))
         };
         let tail = geometry
             .tail
@@ -311,7 +343,7 @@ impl Canvas {
                 line_join: LineJoin::Round,
                 ..Stroke::default()
             };
-            for (path, _, transform) in tail.iter().chain(head.iter()) {
+            for (_, path, _, transform) in tail.iter().chain(head.iter()) {
                 self.stroke_path(path, &halo, &shape_outline, *transform);
             }
             for path in &body {
@@ -320,14 +352,33 @@ impl Canvas {
         }
 
         let paint = solid(with_alpha(snake.color, alpha));
-        if let Some((path, rule, transform)) = &tail {
+        if let Some((shape, path, rule, transform)) = &tail {
             self.fill_path(path, &paint, *rule, *transform);
+            self.paint_layers(shape, *transform, alpha);
         }
         for path in &body {
             self.stroke_path(path, &paint, &body_stroke(CELL as f32), to_card);
         }
-        if let Some((path, rule, transform)) = &head {
+        if let Some((shape, path, rule, transform)) = &head {
             self.fill_path(path, &paint, *rule, *transform);
+            self.paint_layers(shape, *transform, alpha);
+        }
+    }
+
+    /// A catalog shape's fixed-colour layers over its base fill: multi-colour
+    /// special art keeps its accents (and white details) at their true
+    /// colours; single-colour art has none.
+    fn paint_layers(&mut self, shape: &CatalogShape, transform: Transform, alpha: f32) {
+        for layer in layers(shape) {
+            let (Some(path), Some(color)) = (path_from_d(layer.d), parse_hex(layer.fill)) else {
+                continue;
+            };
+            self.fill_path(
+                &path,
+                &solid(with_alpha(color, alpha)),
+                fill_rule(layer.fill_rule),
+                transform,
+            );
         }
     }
 
@@ -367,6 +418,7 @@ impl Canvas {
         };
         let transform = tile_transform(x, y, side);
         self.fill_path(&path, &solid(color), fill_rule(shape.fill_rule), transform);
+        self.paint_layers(shape, transform, 1.0);
     }
 }
 
@@ -516,5 +568,54 @@ mod tests {
             let fallback = shape(kind, slug).unwrap();
             assert_eq!((fallback.kind, fallback.file), (kind, "default"));
         }
+    }
+
+    #[test]
+    fn multi_colour_layers_paint_fixed_colours() {
+        // The puffin's beak is a fixed #e84600 layer over the snake-coloured
+        // base. Never scan for the exact colour: anti-aliased edges blend
+        // with the base, so count pixels within a small tolerance instead.
+        let near_beak = |p: [u8; 3]| {
+            p.iter()
+                .zip([232u8, 70, 0])
+                .all(|(c, t)| c.abs_diff(t) <= 16)
+        };
+        let count = |c: &Canvas| {
+            (0..crate::og::canvas::HEIGHT)
+                .flat_map(|y| (0..crate::og::canvas::WIDTH).map(move |x| (x, y)))
+                .filter(|&(x, y)| near_beak(c.pixel(x, y)))
+                .count()
+        };
+        let orange = crate::og::canvas::parse_hex("#da8a1a").unwrap();
+
+        // Head tile (the roster avatar): the beak is a solid interior region.
+        let mut c = Canvas::new().unwrap();
+        c.head_tile(
+            shape(AssetKind::Head, "beach-puffin-special"),
+            orange,
+            10.0,
+            10.0,
+            200.0,
+        );
+        let tiles = count(&c);
+        assert!(tiles > 100, "beak pixels on the head tile: {tiles}");
+
+        // A board (the social-card art): same painting through `snake`.
+        let art = BoardArt {
+            width: 11,
+            height: 11,
+            snakes: vec![BoardSnake {
+                body: vec![(4, 5), (5, 5), (6, 5)],
+                color: orange,
+                head: shape(AssetKind::Head, "beach-puffin-special"),
+                tail: shape(AssetKind::Tail, "default"),
+                eliminated: false,
+            }],
+            ..BoardArt::default()
+        };
+        let mut c = Canvas::new().unwrap();
+        c.board(&art, 100.0, 100.0, 500.0);
+        let board = count(&c);
+        assert!(board > 20, "beak pixels on the board: {board}");
     }
 }

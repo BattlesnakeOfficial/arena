@@ -1,5 +1,5 @@
 import { test, expect } from '../fixtures/test';
-import { query } from '../fixtures/db';
+import { query, registerFixtureEntries } from '../fixtures/db';
 
 test.describe('Homepage - Authenticated User', () => {
   test('displays user info when logged in', async ({ authenticatedPage, mockUser }) => {
@@ -81,18 +81,19 @@ test.describe('Homepage - calm surfaces', () => {
       "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'"
     );
     const [entry] = await query<{ leaderboard_entry_id: string }>(
-      `INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-       VALUES ($1, $2) RETURNING leaderboard_entry_id`,
+      `INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+       VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2) RETURNING leaderboard_entry_id`,
       [leaderboard.leaderboard_id, snake.battlesnake_id]
     );
+    await registerFixtureEntries();
     for (let i = 0; i < 12; i++) {
       const [game] = await query<{ game_id: string }>(
         `INSERT INTO games (board_size, game_type, status)
          VALUES ('11x11', 'Standard', 'finished') RETURNING game_id`
       );
       const [lg] = await query<{ leaderboard_game_id: string }>(
-        `INSERT INTO leaderboard_games (leaderboard_id, game_id)
-         VALUES ($1, $2) RETURNING leaderboard_game_id`,
+        `INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id)
+         VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1)) RETURNING leaderboard_game_id`,
         [leaderboard.leaderboard_id, game.game_id]
       );
       await query(

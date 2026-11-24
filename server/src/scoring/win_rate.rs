@@ -40,7 +40,7 @@ impl ScoringAlgorithm for WinRateScoring {
         &self,
         conn: &mut sqlx::PgConnection,
         event: &GameResultEvent,
-    ) -> cja::Result<()> {
+    ) -> cja::Result<bool> {
         let winner = event
             .outright_winner()
             .map(|winner| winner.leaderboard_entry_id);
@@ -99,7 +99,7 @@ impl ScoringAlgorithm for WinRateScoring {
             }
         }
 
-        Ok(())
+        Ok(true)
     }
 
     async fn get_scores(&self, pool: &PgPool, entry_ids: &[Uuid]) -> cja::Result<Vec<EntryScore>> {

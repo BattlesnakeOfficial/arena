@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{AppState, Jobs, SendNotificationEmailJob};
 use crate::config::{AppConfig, DEFAULT_JOB_SHUTDOWN_DRAIN_SECS};
+use uuid::Uuid;
 
 fn assert_html_links_in_text(form: &std::collections::HashMap<String, String>) {
     let html = form.get("html").expect("HTML part");
@@ -266,6 +267,695 @@ async fn free_worker_takes_game_before_backup_backlog(pool: PgPool) -> cja::Resu
     result
 }
 
+/// Poll every 20 ms until `cond` is true, erroring after `timeout`.
+/// Test helper for behavior probes against live workers.
+async fn poll_until<F>(timeout: Duration, mut cond: impl FnMut() -> F) -> cja::Result<()>
+where
+    F: std::future::Future<Output = cja::Result<bool>>,
+{
+    tokio::time::timeout(timeout, async {
+        loop {
+            if cond().await? {
+                return Ok::<(), cja::color_eyre::Report>(());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .map_err(|_| cja::color_eyre::eyre::eyre!("condition not met within {timeout:?}"))??;
+    Ok(())
+}
+
+/// Spawn `count` job workers through the REAL `crate::job_worker_future`
+/// path — i.e. the real `JobConfig::worker_config`, whose
+/// `type_concurrency` must be `ConcurrencyTracker::process_shared()`
+/// (DEV-2427). The short drain is deliberate: probe bodies only sleep,
+/// so a dropped body is the cheap shutdown path.
+async fn spawn_real_workers<R>(
+    state: &AppState,
+    make_registry: impl Fn() -> R,
+    shutdown: CancellationToken,
+    count: usize,
+) -> tokio::task::JoinSet<cja::Result<()>>
+where
+    R: cja::jobs::registry::JobRegistry<AppState> + std::marker::Send + Sync + 'static,
+{
+    let mut workers = tokio::task::JoinSet::new();
+    for _ in 0..count {
+        workers.spawn(crate::job_worker_future(
+            state.clone(),
+            make_registry(),
+            shutdown.clone(),
+            Duration::from_millis(500),
+        ));
+    }
+    workers
+}
+
+/// Cancel, join (8 s cap, abort on timeout), and assert every lock was
+/// released — the `run_idle_gate_burst` teardown, shared so a failed
+/// assertion still drains its workers before propagating.
+async fn drain_workers_and_assert_unlocked(
+    mut workers: tokio::task::JoinSet<cja::Result<()>>,
+    shutdown: CancellationToken,
+    pool: &PgPool,
+) -> cja::Result<()> {
+    shutdown.cancel();
+    let drained = tokio::time::timeout(Duration::from_secs(8), async {
+        while let Some(worker) = workers.join_next().await {
+            worker??;
+        }
+        Ok::<(), cja::color_eyre::Report>(())
+    })
+    .await;
+    if drained.is_err() {
+        workers.abort_all();
+    }
+    drained??;
+    let locked: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE locked_by IS NOT NULL")
+        .fetch_one(pool)
+        .await?;
+    cja::color_eyre::eyre::ensure!(locked == 0, "worker shutdown left {locked} locks");
+    Ok(())
+}
+
+async fn count_locked(pool: &PgPool, name: &str) -> cja::Result<i64> {
+    let locked: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM jobs WHERE name = $1 AND locked_by IS NOT NULL")
+            .bind(name)
+            .fetch_one(pool)
+            .await?;
+    Ok(locked)
+}
+
+mod concurrency_probes {
+    //! Probe job types for the DEV-2427 concurrency-cap tests. Names are
+    //! unique to this module so the process-wide `ConcurrencyTracker`
+    //! (keyed by job name) can never couple with another test's workers.
+
+    use super::AppState;
+    use cja::jobs::{Concurrency, Job};
+    use serde::{Deserialize, Serialize};
+    use std::num::NonZeroUsize;
+    use std::time::Duration;
+
+    /// Cap-1 probe: marks its start, sleeps 3 s, marks its finish.
+    /// `PerProcess(1)` means only one attempt of this type may be claimed
+    /// at a time across ALL workers sharing the process-wide tracker.
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    pub struct CapOneProbeJob {
+        pub id: uuid::Uuid,
+    }
+
+    #[async_trait::async_trait]
+    impl Job<AppState> for CapOneProbeJob {
+        const NAME: &'static str = "CapOneProbeJob";
+        const CONCURRENCY: Concurrency = Concurrency::PerProcess(NonZeroUsize::MIN);
+
+        async fn run(&self, state: AppState) -> cja::Result<()> {
+            sqlx::query("INSERT INTO cap_probe_markers (id, kind) VALUES ($1, 'cap')")
+                .bind(self.id)
+                .execute(&state.db)
+                .await?;
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            sqlx::query("UPDATE cap_probe_markers SET finished = TRUE WHERE id = $1")
+                .bind(self.id)
+                .execute(&state.db)
+                .await?;
+            Ok(())
+        }
+    }
+
+    /// Uncapped probe: proves workers never starve on other types while
+    /// a capped type is saturated (saturated rows are invisible at claim).
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    pub struct FastProbeJob {
+        pub id: uuid::Uuid,
+    }
+
+    #[async_trait::async_trait]
+    impl Job<AppState> for FastProbeJob {
+        const NAME: &'static str = "FastProbeJob";
+
+        async fn run(&self, state: AppState) -> cja::Result<()> {
+            sqlx::query("INSERT INTO cap_probe_markers (id, kind) VALUES ($1, 'fast')")
+                .bind(self.id)
+                .execute(&state.db)
+                .await?;
+            Ok(())
+        }
+    }
+
+    cja::impl_job_registry!(AppState, CapOneProbeJob, FastProbeJob);
+}
+
+mod shared_key_probes {
+    //! Probe job types for the DEV-2432 shared-key tests. Every probe has
+    //! a unique `NAME` AND a unique shared key (never the real `"archive"`
+    //! key — only `wedged_archive_key_does_not_starve_game_runners` may
+    //! contend that), so the process-wide `ConcurrencyTracker` can never
+    //! couple with another test's workers.
+
+    use super::AppState;
+    use cja::jobs::{Concurrency, Job};
+    use serde::{Deserialize, Serialize};
+    use std::num::NonZeroUsize;
+    use std::time::Duration;
+
+    /// Inserts a start marker, sleeps, stamps `finished_at` — so marker
+    /// intervals expose exactly when each attempt held the key.
+    async fn mark_start_finish(state: &AppState, kind: &'static str) -> cja::Result<()> {
+        sqlx::query("INSERT INTO shared_key_probe_markers (id, kind) VALUES ($1, $2)")
+            .bind(uuid::Uuid::new_v4())
+            .bind(kind)
+            .execute(&state.db)
+            .await?;
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        sqlx::query(
+            "UPDATE shared_key_probe_markers SET finished_at = NOW() \
+             WHERE id = (SELECT id FROM shared_key_probe_markers WHERE kind = $1 ORDER BY started_at DESC LIMIT 1)",
+        )
+        .bind(kind)
+        .execute(&state.db)
+        .await?;
+        Ok(())
+    }
+
+    pub mod serial {
+        //! Two types sharing one limit-1 key: their attempts must never
+        //! overlap.
+        use super::*;
+
+        #[derive(Clone, Debug, Deserialize, Serialize)]
+        pub struct SerialAProbeJob;
+
+        #[async_trait::async_trait]
+        impl Job<AppState> for SerialAProbeJob {
+            const NAME: &'static str = "SerialAProbeJob";
+            const CONCURRENCY: Concurrency = Concurrency::PerProcessShared {
+                key: "test-archive-serial",
+                limit: NonZeroUsize::MIN,
+            };
+
+            async fn run(&self, state: AppState) -> cja::Result<()> {
+                mark_start_finish(&state, "serial-a").await
+            }
+        }
+
+        #[derive(Clone, Debug, Deserialize, Serialize)]
+        pub struct SerialBProbeJob;
+
+        #[async_trait::async_trait]
+        impl Job<AppState> for SerialBProbeJob {
+            const NAME: &'static str = "SerialBProbeJob";
+            const CONCURRENCY: Concurrency = Concurrency::PerProcessShared {
+                key: "test-archive-serial",
+                limit: NonZeroUsize::MIN,
+            };
+
+            async fn run(&self, state: AppState) -> cja::Result<()> {
+                mark_start_finish(&state, "serial-b").await
+            }
+        }
+
+        cja::impl_job_registry!(AppState, SerialAProbeJob, SerialBProbeJob);
+    }
+
+    pub mod runtime {
+        //! A hung holder bounded by `MAX_RUNTIME` plus a fast sibling on
+        //! the same key: the expiry must free the key so the sibling is
+        //! claimed.
+        use super::*;
+
+        #[derive(Clone, Debug, Deserialize, Serialize)]
+        pub struct HungRuntimeProbeJob;
+
+        #[async_trait::async_trait]
+        impl Job<AppState> for HungRuntimeProbeJob {
+            const NAME: &'static str = "HungRuntimeProbeJob";
+            const CONCURRENCY: Concurrency = Concurrency::PerProcessShared {
+                key: "test-archive-runtime",
+                limit: NonZeroUsize::MIN,
+            };
+            const MAX_RUNTIME: Duration = Duration::from_secs(2);
+
+            async fn run(&self, state: AppState) -> cja::Result<()> {
+                sqlx::query("INSERT INTO shared_key_probe_markers (id, kind) VALUES ($1, 'hung')")
+                    .bind(uuid::Uuid::new_v4())
+                    .execute(&state.db)
+                    .await?;
+                // Hang: the claim commits before the body runs, so the
+                // start marker (not `locked_by`) is the reliable signal.
+                std::future::pending().await
+            }
+        }
+
+        #[derive(Clone, Debug, Deserialize, Serialize)]
+        pub struct FastSiblingProbeJob;
+
+        #[async_trait::async_trait]
+        impl Job<AppState> for FastSiblingProbeJob {
+            const NAME: &'static str = "FastSiblingProbeJob";
+            const CONCURRENCY: Concurrency = Concurrency::PerProcessShared {
+                key: "test-archive-runtime",
+                limit: NonZeroUsize::MIN,
+            };
+
+            async fn run(&self, state: AppState) -> cja::Result<()> {
+                sqlx::query(
+                    "INSERT INTO shared_key_probe_markers (id, kind) VALUES ($1, 'fast-sibling')",
+                )
+                .bind(uuid::Uuid::new_v4())
+                .execute(&state.db)
+                .await?;
+                Ok(())
+            }
+        }
+
+        cja::impl_job_registry!(AppState, HungRuntimeProbeJob, FastSiblingProbeJob);
+    }
+}
+
+/// DEV-2427: a job type declaring `PerProcess(1)` is claimed once at a
+/// time across workers sharing the process-wide tracker wired by
+/// `JobConfig::worker_config` — the tracker must be
+/// `ConcurrencyTracker::process_shared()`, or every worker counts alone
+/// and the cap silently becomes "one per worker" (100 concurrent
+/// backups on prod's worker count). Bypass probe: temporarily swap in
+/// `ConcurrencyTracker::isolated()` and this test fails.
+#[sqlx::test(migrations = "../migrations")]
+async fn capped_type_is_claimed_once_through_worker_config(pool: PgPool) -> cja::Result<()> {
+    use concurrency_probes::{CapOneProbeJob, FastProbeJob};
+
+    let markers = |kind: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let count: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM cap_probe_markers WHERE kind = $1")
+                    .bind(kind)
+                    .fetch_one(&pool)
+                    .await?;
+            Ok::<i64, cja::color_eyre::Report>(count)
+        }
+    };
+
+    sqlx::query(
+        "CREATE TABLE cap_probe_markers (id uuid PRIMARY KEY, kind text NOT NULL, finished boolean NOT NULL DEFAULT FALSE)",
+    )
+    .execute(&pool)
+    .await?;
+    let mut state = AppState::test_from_pool(pool.clone());
+    Arc::make_mut(&mut state.config).job.poll_interval_ms = 200;
+
+    for _ in 0..2 {
+        CapOneProbeJob {
+            id: uuid::Uuid::new_v4(),
+        }
+        .enqueue(state.clone(), "cap-probe".into(), None)
+        .await?;
+    }
+    FastProbeJob {
+        id: uuid::Uuid::new_v4(),
+    }
+    .enqueue(state.clone(), "cap-probe".into(), None)
+    .await?;
+
+    let shutdown = CancellationToken::new();
+    let workers =
+        spawn_real_workers(&state, || concurrency_probes::Jobs, shutdown.clone(), 3).await;
+
+    let result: cja::Result<()> = async {
+        // All three attempt starts happen (fast types never starve) ...
+        poll_until(Duration::from_secs(3), || async {
+            Ok(markers("cap").await? == 1 && markers("fast").await? == 1)
+        })
+        .await?;
+        // ... but while the first cap attempt sleeps its 3 s, the second
+        // cap row stays unclaimed: the type is saturated at claim.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let started = markers("cap").await?;
+        cja::color_eyre::eyre::ensure!(
+            started == 1,
+            "second cap started concurrently: {started} markers"
+        );
+        let locked = count_locked(&pool, "CapOneProbeJob").await?;
+        cja::color_eyre::eyre::ensure!(locked == 1, "expected 1 locked cap row, found {locked}");
+        // After the first finishes, the second starts — the cap releases;
+        // no deadlock.
+        poll_until(Duration::from_secs(6), || async {
+            Ok(markers("cap").await? == 2)
+        })
+        .await?;
+        Ok(())
+    }
+    .await;
+
+    drain_workers_and_assert_unlocked(workers, shutdown, &pool).await?;
+    result
+}
+
+/// DEV-2432 incident regression (2026-11-16: 98/100 workers parked
+/// behind one hung archive holding the old in-body `BACKUP_SLOT`; game
+/// runners went unclaimed and matchmaking froze ~3 h). The four archive
+/// types share one cja `PerProcessShared` key (`"archive"`, limit 1):
+/// while the key is saturated — here held from OUTSIDE the worker, the
+/// wedge shape — every archive row is invisible at claim, so a wedged
+/// holder parks ZERO workers and a game enqueued alongside the archive
+/// rows is still claimed and run.
+///
+/// Worst-case external hold time: the runner-error poll (≤3 s) plus the
+/// ~1 s exclusion stability window ≈ ≤4 s from `try_acquire` to
+/// `drop(held)`; the ≤10 s drain runs AFTER the hold is released.
+///
+/// Division of proof: this test's exclusion + drain steps prove the real
+/// four types' WIRING (excluded at claim while the "archive" key is
+/// held, claimed and serialized once it is released — summed locked
+/// count ≤1 on every drain poll); `shared_key_types_never_run_concurrently`
+/// proves NON-OVERLAP via marker intervals. `Worker::new` also runs
+/// cja's `validate_shared_limits` on spawn, so a same-key-conflicting-
+/// limits registry fails here immediately.
+///
+/// INVARIANT: the cja type-concurrency tracker is process-wide and keyed
+/// by `ConcurrencyScope` (type name or shared key), so this is the ONLY
+/// test in the arena bin allowed to contend the real `"archive"` key and
+/// spawn workers through the real `crate::jobs::Jobs` registry (it
+/// enqueues exactly the four archive rows + one `GameRunnerJob`). Every
+/// other worker test must use probe types with unique `NAME`s AND
+/// unique shared keys, never the real `"archive"` key.
+#[sqlx::test(migrations = "../migrations")]
+async fn wedged_archive_key_does_not_starve_game_runners(pool: PgPool) -> cja::Result<()> {
+    const ARCHIVE_JOB_NAMES: [&str; 4] = [
+        "BackupSingleGameJob",
+        "NativeBackupSingleGameJob",
+        "PruneGameTurnsJob",
+        "DroppedFieldsRepairGameJob",
+    ];
+
+    let (mut state, _store, _engine) = crate::backup::test_support::engine_fixture(&pool).await?;
+    Arc::make_mut(&mut state.config).job.poll_interval_ms = 200;
+
+    // Hold the REAL "archive" key from outside, before any worker runs —
+    // exactly the wedge shape (a hung holder that has not yet hit its
+    // MAX_RUNTIME). `try_acquire` takes the scope by value.
+    let held = cja::jobs::ConcurrencyTracker::process_shared()
+        .try_acquire(
+            cja::jobs::ConcurrencyScope::Shared(super::BACKUP_ARCHIVE_KEY.to_owned()),
+            NonZeroUsize::MIN,
+        )
+        .expect("the shared archive key must be free before any worker runs");
+
+    // All five rows enqueued together, BEFORE any worker runs (the
+    // incident's order: archive rows parked first, the game alongside).
+    crate::backup::enqueue_backup_job(&state, "wedged-archive-game").await?;
+    crate::jobs::NativeBackupSingleGameJob {
+        game_id: Uuid::new_v4(),
+    }
+    .enqueue(state.clone(), "test".into(), None)
+    .await?;
+    crate::jobs::PruneGameTurnsJob {
+        game_id: Uuid::new_v4(),
+    }
+    .enqueue(state.clone(), "test".into(), None)
+    .await?;
+    crate::jobs::DroppedFieldsRepairGameJob {
+        engine_game_id: "wedged-archive-game".into(),
+    }
+    .enqueue(state.clone(), "test".into(), None)
+    .await?;
+    crate::jobs::GameRunnerJob {
+        game_id: Uuid::new_v4(),
+    }
+    .enqueue(state.clone(), "game".into(), None)
+    .await?;
+
+    let shutdown = CancellationToken::new();
+    let workers = spawn_real_workers(&state, || crate::jobs::Jobs, shutdown.clone(), 3).await;
+
+    // Each of the four archive rows is still queued, unclaimed, and never
+    // attempted while the key is held. Deliberately stronger than
+    // `count_locked == 0`: cja DELETES successful attempts and failed
+    // attempts return with `error_count >= 1`, so a miswired type gets
+    // its row claimed and completes, collapsing this count to 0.
+    let archive_rows_never_attempted = || async {
+        for name in ARCHIVE_JOB_NAMES {
+            let queued: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM jobs WHERE name = $1 AND locked_by IS NULL AND error_count = 0",
+            )
+            .bind(name)
+            .fetch_one(&pool)
+            .await?;
+            cja::color_eyre::eyre::ensure!(
+                queued == 1,
+                "archive row for {name} must sit unclaimed and never-attempted \
+                 while the shared archive key is held (found {queued})"
+            );
+        }
+        Ok::<(), cja::color_eyre::Report>(())
+    };
+
+    let result: cja::Result<()> = async {
+        // FIRST the liveness proof: the runner is claimed and fails fast
+        // ("Game not found" — a fresh UUID has no game row); that error IS
+        // the proof a worker was free and actively claiming DURING the
+        // exclusion window.
+        poll_until(Duration::from_secs(3), || async {
+            let row: Option<(i32, Option<String>)> = sqlx::query_as(
+                "SELECT error_count, last_error_message FROM jobs WHERE name = 'GameRunnerJob'",
+            )
+            .fetch_optional(&pool)
+            .await?;
+            Ok(matches!(&row, Some((count, Some(msg))) if *count >= 1 && msg.contains("Game not found")))
+        })
+        .await?;
+
+        // THEN the exclusion stability window: assert, sleep ~1 s, assert
+        // again — the four archive rows never moved while the key was held.
+        archive_rows_never_attempted().await?;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        archive_rows_never_attempted().await?;
+        Ok(())
+    }
+    .await;
+
+    // Release the wedge; all four archive rows must now drain. On EVERY
+    // poll iteration the summed locked count across the four names must
+    // be ≤ 1 — never two archive types claimed at once — and drain-to-zero
+    // proves each row WAS claimed (rows only disappear through a claim).
+    // Expected outcomes: backup — engine row missing → permanent failure
+    // recorded → Ok; native — skips missing game → Ok; prune — predicate
+    // no match → Skipped → Ok; repair — engine row missing → queue row
+    // marked failed → Ok. Releasing an external hold wakes no idle worker;
+    // at 200 ms polling the 10 s drain window is ample.
+    drop(held);
+    let drain_result: cja::Result<()> = async {
+        poll_until(Duration::from_secs(10), || async {
+            let mut remaining = 0i64;
+            let mut locked_sum = 0i64;
+            for name in ARCHIVE_JOB_NAMES {
+                let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE name = $1")
+                    .bind(name)
+                    .fetch_one(&pool)
+                    .await?;
+                remaining += queued;
+                locked_sum += count_locked(&pool, name).await?;
+            }
+            cja::color_eyre::eyre::ensure!(
+                locked_sum <= 1,
+                "{locked_sum} archive rows locked at once across the four archive \
+                 types; the shared archive key must serialize them"
+            );
+            Ok(remaining == 0)
+        })
+        .await?;
+        Ok(())
+    }
+    .await;
+
+    drain_workers_and_assert_unlocked(workers, shutdown, &pool).await?;
+    result?;
+    drain_result?;
+    Ok(())
+}
+
+/// DEV-2432: two job types sharing one `PerProcessShared` key never run
+/// concurrently — attempts across BOTH types are serialized on one
+/// budget. Asserted via pairwise-disjoint marker intervals (stronger
+/// than lock counts: an overlap that starts and finishes between polls
+/// still shows in the intervals), plus the summed locked count ≤1 on
+/// every poll iteration while waiting.
+#[sqlx::test(migrations = "../migrations")]
+async fn shared_key_types_never_run_concurrently(pool: PgPool) -> cja::Result<()> {
+    use shared_key_probes::serial::{SerialAProbeJob, SerialBProbeJob};
+
+    sqlx::query(
+        "CREATE TABLE shared_key_probe_markers (id uuid PRIMARY KEY, kind text NOT NULL, started_at timestamptz NOT NULL DEFAULT NOW(), finished_at timestamptz)",
+    )
+    .execute(&pool)
+    .await?;
+    let mut state = AppState::test_from_pool(pool.clone());
+    Arc::make_mut(&mut state.config).job.poll_interval_ms = 200;
+
+    for _ in 0..2 {
+        SerialAProbeJob
+            .enqueue(state.clone(), "probe".into(), None)
+            .await?;
+        SerialBProbeJob
+            .enqueue(state.clone(), "probe".into(), None)
+            .await?;
+    }
+
+    let shutdown = CancellationToken::new();
+    let workers = spawn_real_workers(
+        &state,
+        || shared_key_probes::serial::Jobs,
+        shutdown.clone(),
+        3,
+    )
+    .await;
+
+    let result: cja::Result<()> = async {
+        poll_until(Duration::from_secs(10), || async {
+            let finished: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM shared_key_probe_markers WHERE finished_at IS NOT NULL",
+            )
+            .fetch_one(&pool)
+            .await?;
+            let locked_sum = count_locked(&pool, "SerialAProbeJob").await?
+                + count_locked(&pool, "SerialBProbeJob").await?;
+            cja::color_eyre::eyre::ensure!(
+                locked_sum <= 1,
+                "{locked_sum} probe rows locked at once on key test-archive-serial; \
+                 the shared key must serialize them"
+            );
+            Ok(finished == 4)
+        })
+        .await?;
+
+        let intervals: Vec<(
+            String,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        )> = sqlx::query_as(
+            "SELECT kind, started_at, finished_at FROM shared_key_probe_markers \
+                 ORDER BY started_at",
+        )
+        .fetch_all(&pool)
+        .await?;
+        cja::color_eyre::eyre::ensure!(
+            intervals.len() == 4,
+            "expected 4 probe markers, found {}",
+            intervals.len()
+        );
+        for (i, (kind_a, start_a, end_a)) in intervals.iter().enumerate() {
+            for (kind_b, start_b, end_b) in intervals.iter().skip(i + 1) {
+                let disjoint = end_a <= start_b || end_b <= start_a;
+                cja::color_eyre::eyre::ensure!(
+                    disjoint,
+                    "probe intervals overlapped on key test-archive-serial: \
+                     {kind_a} [{start_a:?}..{end_a:?}] vs {kind_b} [{start_b:?}..{end_b:?}]"
+                );
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    drain_workers_and_assert_unlocked(workers, shutdown, &pool).await?;
+    result
+}
+
+/// DEV-2432: a holder hung past its `MAX_RUNTIME` frees the shared key —
+/// the expiry drops the attempt future, which releases the worker's slot
+/// handle, so a sibling on the same key becomes claimable. The hung row
+/// retries with backoff (its terminal state is NOT asserted); the
+/// load-bearing assertions are the sibling's completion and the
+/// "max runtime" error on the hung row.
+#[sqlx::test(migrations = "../migrations")]
+async fn hung_holder_frees_shared_key_at_max_runtime(pool: PgPool) -> cja::Result<()> {
+    use shared_key_probes::runtime::{FastSiblingProbeJob, HungRuntimeProbeJob};
+
+    sqlx::query(
+        "CREATE TABLE shared_key_probe_markers (id uuid PRIMARY KEY, kind text NOT NULL, started_at timestamptz NOT NULL DEFAULT NOW(), finished_at timestamptz)",
+    )
+    .execute(&pool)
+    .await?;
+    let mut state = AppState::test_from_pool(pool.clone());
+    Arc::make_mut(&mut state.config).job.poll_interval_ms = 200;
+
+    HungRuntimeProbeJob
+        .enqueue(state.clone(), "probe".into(), None)
+        .await?;
+
+    let shutdown = CancellationToken::new();
+    let workers = spawn_real_workers(
+        &state,
+        || shared_key_probes::runtime::Jobs,
+        shutdown.clone(),
+        3,
+    )
+    .await;
+
+    let result: cja::Result<()> = async {
+        // Wait for the hung probe's START MARKER (the claim commits before
+        // the body runs; `locked_by` alone can miss it), then enqueue the
+        // sibling: it is invisible at claim while the key is held.
+        poll_until(Duration::from_secs(3), || async {
+            let hung_started: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM shared_key_probe_markers WHERE kind = 'hung'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            Ok(hung_started == 1)
+        })
+        .await?;
+        FastSiblingProbeJob
+            .enqueue(state.clone(), "probe".into(), None)
+            .await?;
+
+        // Best-effort only: at ~1 s the hung attempt (2 s budget) still
+        // holds the key, so the sibling should not have started. Soft on
+        // purpose — scheduler starvation can compress this window; the
+        // load-bearing assertions below are the sibling completing and
+        // the "max runtime" error text.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let early: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM shared_key_probe_markers WHERE kind = 'fast-sibling'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        if early == 0 {
+            tracing::info!(
+                "sibling not started while the hung probe held the key test-archive-runtime"
+            );
+        }
+
+        // The hung attempt dies at its 2 s MAX_RUNTIME → the worker's slot
+        // handle releases → the key frees → the sibling is claimed and
+        // completes; the hung row carries the "max runtime" error.
+        poll_until(Duration::from_secs(10), || async {
+            let sibling_done: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM shared_key_probe_markers WHERE kind = 'fast-sibling'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            let max_runtime_error: Option<String> = sqlx::query_scalar(
+                "SELECT last_error_message FROM jobs WHERE name = 'HungRuntimeProbeJob'",
+            )
+            .fetch_optional(&pool)
+            .await?
+            .flatten();
+            Ok(sibling_done == 1
+                && max_runtime_error.is_some_and(|msg| msg.contains("max runtime")))
+        })
+        .await?;
+        Ok(())
+    }
+    .await;
+
+    drain_workers_and_assert_unlocked(workers, shutdown, &pool).await?;
+    result
+}
+
 /// Run manually against an isolated PostgreSQL cluster with at least 200
 /// available connections. This measures the same table counters used in prod.
 #[sqlx::test(migrations = "../migrations")]
@@ -357,14 +1047,19 @@ async fn idle_claim_scan_rate_before_and_after_gate(pool: PgPool) -> cja::Result
 async fn exhausted_job_is_archived_and_worker_continues(pool: PgPool) -> cja::Result<()> {
     let failed_id = uuid::Uuid::new_v4();
     let healthy_id = uuid::Uuid::new_v4();
-    // An unknown job deterministically fails without making external calls.
-    // Higher priority guarantees it runs before the healthy control job.
+    // A registered job whose first fetch deterministically fails: the
+    // leaderboard game does not exist, so `update_ratings` errors before
+    // any side effect. (An unknown job NAME no longer works for this:
+    // cja #87 releases unknown names uncharged on an age-scaled delay
+    // instead of charging them toward dead-letter.) Higher priority
+    // guarantees it runs before the healthy control job.
     let created_at = sqlx::query_scalar!(
         "INSERT INTO jobs (job_id, name, payload, context, priority, error_count)
-         VALUES ($1, 'MigrationTestFailure', '{\"reference\":713}', 'migration-test', 10, $2)
+         VALUES ($1, 'LeaderboardRatingUpdateJob', $3, 'migration-test', 10, $2)
          RETURNING created_at",
         failed_id,
         DEFAULT_MAX_RETRIES,
+        serde_json::json!({"leaderboard_game_id": failed_id}),
     )
     .fetch_one(&pool)
     .await?;
@@ -418,17 +1113,112 @@ async fn exhausted_job_is_archived_and_worker_continues(pool: PgPool) -> cja::Re
     assert_eq!(archived.len(), 1, "only the exhausted job is archived");
     let archived = &archived[0];
     assert_eq!(archived.original_job_id, failed_id);
-    assert_eq!(archived.name, "MigrationTestFailure");
-    assert_eq!(archived.payload, serde_json::json!({"reference": 713}));
+    assert_eq!(archived.name, "LeaderboardRatingUpdateJob");
+    assert_eq!(
+        archived.payload,
+        serde_json::json!({"leaderboard_game_id": failed_id})
+    );
     assert_eq!(archived.context, "migration-test");
     assert_eq!(archived.priority, 10);
     assert_eq!(archived.error_count, DEFAULT_MAX_RETRIES + 1);
-    assert_eq!(
-        archived.last_error_message.as_deref(),
-        Some("Unknown job type: MigrationTestFailure")
+    assert!(
+        archived
+            .last_error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Failed to fetch leaderboard game")),
+        "unexpected dead-letter message: {:?}",
+        archived.last_error_message
     );
     assert_eq!(archived.created_at, created_at);
     assert!(archived.failed_at >= created_at);
+    Ok(())
+}
+
+/// cja #87: a job whose `name` is not in this binary's registry is released
+/// UNCHARGED on an age-scaled delay (30s while the row is young) instead of
+/// climbing the retry ladder — so a newer binary's job type survives a
+/// rolling deploy where an old replica claims it. Assert that behaviour:
+/// the row stays in `jobs` with `error_count` untouched, nothing lands in
+/// `dead_letter_jobs`, and a healthy job in the same queue still completes.
+#[sqlx::test(migrations = "../migrations")]
+async fn unknown_job_name_is_released_uncharged_and_worker_continues(
+    pool: PgPool,
+) -> cja::Result<()> {
+    let unknown_id = uuid::Uuid::new_v4();
+    let healthy_id = uuid::Uuid::new_v4();
+    let created_at = sqlx::query_scalar!(
+        "INSERT INTO jobs (job_id, name, payload, context, priority)
+         VALUES ($1, 'JobTypeFromANewerBinary', '{}', 'unknown-name-test', 10)
+         RETURNING created_at",
+        unknown_id,
+    )
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query!(
+        "INSERT INTO jobs (job_id, name, payload, context, priority)
+         VALUES ($1, 'NoopJob', 'null', 'unknown-name-test', 0)",
+        healthy_id,
+    )
+    .execute(&pool)
+    .await?;
+
+    let shutdown = CancellationToken::new();
+    let state = AppState::test_from_pool(pool.clone());
+    let worker = job_worker(
+        state.clone(),
+        Jobs,
+        Duration::from_millis(10),
+        DEFAULT_MAX_RETRIES,
+        shutdown.clone(),
+        AppConfig::test_default().job.worker_config(
+            Duration::from_secs(DEFAULT_JOB_SHUTDOWN_DRAIN_SECS),
+            state.idle_poll_gate.clone(),
+        ),
+    );
+    let observe = async {
+        let _cancel = shutdown.drop_guard();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                // Only the unknown-name row remains once NoopJob completes.
+                let remaining =
+                    sqlx::query_scalar!("SELECT COUNT(*) FROM jobs WHERE name = 'NoopJob'")
+                        .fetch_one(&pool)
+                        .await?;
+                if remaining == Some(0) {
+                    return Ok::<_, cja::color_eyre::Report>(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?
+    };
+    let (worker_result, observed) = tokio::join!(worker, observe);
+    worker_result?;
+    observed?;
+
+    let released = sqlx::query!(
+        "SELECT error_count, locked_by, locked_at, run_at FROM jobs WHERE job_id = $1",
+        unknown_id,
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        released.error_count, 0,
+        "unknown names are released uncharged"
+    );
+    assert!(released.locked_by.is_none());
+    assert!(released.locked_at.is_none());
+    assert!(
+        released.run_at > created_at,
+        "run_at is pushed into the future by the age-scaled release"
+    );
+    let archived = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM dead_letter_jobs WHERE original_job_id = $1",
+        unknown_id,
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(archived, Some(0));
     Ok(())
 }
 
@@ -721,7 +1511,7 @@ async fn notification_email_is_sent_once_even_for_concurrent_runs(pool: PgPool) 
         .expect(1)
         .mount(&server)
         .await;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1673001, 'notification-job-test', '', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_email) VALUES (1673001, 'notification-job-test', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
     let receipt = crate::notifications::record(
         &pool,
         NewNotification {
@@ -843,7 +1633,7 @@ async fn achievement_email_uses_confirmed_player_address_and_one_layout(
         .expect(1)
         .mount(&server)
         .await;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1669008, 'achievement-mail-test', '', 'github@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_email) VALUES (1669008, 'achievement-mail-test', 'github@example.com') RETURNING user_id").fetch_one(&pool).await?;
     sqlx::query!(
         "UPDATE users SET notification_email = 'confirmed@example.com' WHERE user_id = $1",
         user_id
@@ -943,7 +1733,7 @@ async fn legacy_text_row_gets_escaped_html(pool: PgPool) -> cja::Result<()> {
         .expect(1)
         .mount(&server)
         .await;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1675001, 'legacy-html-test', '', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_email) VALUES (1675001, 'legacy-html-test', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
     let notification_id = sqlx::query_scalar!("INSERT INTO notifications (user_id, kind, title, body, in_app_visible) VALUES ($1, 'snake_matchmaking_paused', 'Legacy', 'Legacy', true) RETURNING notification_id", user_id).fetch_one(&pool).await?;
     sqlx::query!("INSERT INTO notification_emails (notification_id, subject, text, recipient_user) VALUES ($1, 'Legacy', $2, true)", notification_id, "First line\n<script>alert(1)</script>\nLast line").execute(&pool).await?;
     let mut state = AppState::test_from_pool(pool.clone());
@@ -977,7 +1767,7 @@ async fn send_time_opt_out_keeps_in_app_event(pool: PgPool) -> cja::Result<()> {
         EmailRecipient, NewEmail, NewNotification, NotificationChannel, NotificationKind,
     };
     use wiremock::MockServer;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (1673002, 'notification-optout-test', '') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login) VALUES (1673002, 'notification-optout-test') RETURNING user_id").fetch_one(&pool).await?;
     let receipt = crate::notifications::record(
         &pool,
         NewNotification {
@@ -1123,7 +1913,7 @@ async fn in_app_opt_out_at_raise_does_not_suppress_email(pool: PgPool) -> cja::R
         .expect(1)
         .mount(&server)
         .await;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1673006, 'in-app-off-test', '', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_email) VALUES (1673006, 'in-app-off-test', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
     let mut connection = pool.acquire().await?;
     crate::models::notification::set_preference(
         &mut connection,
@@ -1199,7 +1989,7 @@ async fn verification_ignores_preferences_and_retries_transport_failure(
         )
         .mount(&server)
         .await;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (1673003, 'verification-job-test', '') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login) VALUES (1673003, 'verification-job-test') RETURNING user_id").fetch_one(&pool).await?;
     sqlx::query!(
         "UPDATE users SET notification_email = 'confirmed@example.com' WHERE user_id = $1",
         user_id
@@ -1235,7 +2025,12 @@ async fn verification_ignores_preferences_and_retries_transport_failure(
             from: "Arena <reply@example.com>".into(),
             base_url: server.uri(),
         }),
-        reqwest::Client::new(),
+        // The per-request timeout no longer exists in `Mailer::send`; the
+        // client-level timeout governs (mirrors `state.rs`), keeping the
+        // elapsed-time assertion below meaningful.
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()?,
     );
     let job = SendNotificationEmailJob {
         notification_id: receipt.notification_id,
@@ -1254,7 +2049,9 @@ async fn verification_ignores_preferences_and_retries_transport_failure(
     let logs = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM email_log")
         .fetch_one(&pool)
         .await?;
-    assert_eq!((tokens, logs), (0, 0));
+    // The 500 failed the send, but the attempt still logged (and spent
+    // budget) — the log row commits before the HTTP call.
+    assert_eq!((tokens, logs), (0, 1));
     let started = std::time::Instant::now();
     assert!(job.run(state.clone()).await.is_err());
     assert!(
@@ -1267,7 +2064,9 @@ async fn verification_ignores_preferences_and_retries_transport_failure(
     let logs = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM email_log")
         .fetch_one(&pool)
         .await?;
-    assert_eq!((tokens, logs), (0, 0));
+    // The timed-out attempt logged too; the job tx rolled back, so the
+    // minted token was never persisted in the clear.
+    assert_eq!((tokens, logs), (0, 2));
     job.run(state.clone()).await?;
     let outcome = sqlx::query_scalar!(
         "SELECT outcome FROM notification_emails WHERE notification_id = $1",
@@ -1362,7 +2161,7 @@ async fn terminal_delivery_conditions_do_not_retry(pool: PgPool) -> cja::Result<
         .expect(0)
         .mount(&server)
         .await;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1673004, 'terminal-job-test', '', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_email) VALUES (1673004, 'terminal-job-test', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
     let make = |recipient| NewNotification {
         user_id,
         kind: NotificationKind::SnakeMatchmakingPaused,
@@ -1466,7 +2265,7 @@ async fn waiting_email_jobs_do_not_hold_pool_connections(pool: PgPool) -> cja::R
         .max_connections(5)
         .connect_with(options)
         .await?;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1673005, 'semaphore-job-test', '', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_email) VALUES (1673005, 'semaphore-job-test', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
     let mut ids = Vec::new();
     for _address in ["first@example.com", "second@example.com"] {
         let receipt = crate::notifications::record(
@@ -1511,11 +2310,25 @@ async fn waiting_email_jobs_do_not_hold_pool_connections(pool: PgPool) -> cja::R
     });
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            let count = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM pg_stat_activity WHERE datname = current_database() AND application_name = 'notification-delivery-test' AND state = 'idle in transaction'").fetch_one(&pool).await?;
-            if count == 1 { break Ok::<_, color_eyre::Report>(()); }
+            // Runtime-checked form; the age filter excludes the
+            // milliseconds-old email-log transaction that `send_limited`
+            // opens alongside the job transaction.
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pg_stat_activity 
+                 WHERE datname = current_database() 
+                   AND application_name = 'notification-delivery-test' 
+                   AND state = 'idle in transaction' 
+                   AND xact_start < NOW() - INTERVAL '500 milliseconds'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            if count == 1 {
+                break Ok::<_, color_eyre::Report>(());
+            }
             tokio::task::yield_now().await;
         }
-    }).await??;
+    })
+    .await??;
     let second_id = ids[1];
     let second = tokio::spawn(async move {
         SendNotificationEmailJob {
@@ -1531,7 +2344,15 @@ async fn waiting_email_jobs_do_not_hold_pool_connections(pool: PgPool) -> cja::R
     .await??;
     assert_eq!(unrelated, 1);
     while !first.is_finished() {
-        let count = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM pg_stat_activity WHERE datname = current_database() AND application_name = 'notification-delivery-test' AND state = 'idle in transaction'").fetch_one(&pool).await?;
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_stat_activity 
+             WHERE datname = current_database() 
+               AND application_name = 'notification-delivery-test' 
+               AND state = 'idle in transaction' 
+               AND xact_start < NOW() - INTERVAL '500 milliseconds'",
+        )
+        .fetch_one(&pool)
+        .await?;
         assert!(
             count <= 1,
             "only the active delivery may hold a transaction"
@@ -1541,6 +2362,199 @@ async fn waiting_email_jobs_do_not_hold_pool_connections(pool: PgPool) -> cja::R
     first.await??;
     second.await??;
     Ok(())
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn permanent_mailgun_failure_writes_failed_outcome(pool: PgPool) -> cja::Result<()> {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("Bad Request"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let receipt = paused_notification(&pool, "failed-outcome", 1673007).await?;
+    let mut state = AppState::test_from_pool(pool.clone());
+    state.mailer = mailer_pointing_at(&server);
+
+    let job = SendNotificationEmailJob {
+        notification_id: receipt,
+    };
+    job.run(state.clone()).await?;
+
+    let row = sqlx::query_as::<_, (Option<String>, bool)>(
+        "SELECT outcome, finished_at IS NOT NULL FROM notification_emails WHERE notification_id = $1",
+    )
+    .bind(receipt)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(row.0.as_deref(), Some("failed"));
+    assert!(row.1, "failed outcome must be terminal (finished_at set)");
+    let requests = server.received_requests().await.expect("wiremock requests");
+    assert_eq!(requests.len(), 1);
+
+    // Terminal outcome short-circuits inside the row lock: a second run
+    // must not spend another HTTP attempt.
+    job.run(state).await?;
+    let requests = server.received_requests().await.expect("wiremock requests");
+    assert_eq!(requests.len(), 1);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn transient_mailgun_failure_leaves_null_outcome_and_logs(pool: PgPool) -> cja::Result<()> {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let receipt = paused_notification(&pool, "transient-outcome", 1673008).await?;
+    let mut state = AppState::test_from_pool(pool.clone());
+    state.mailer = mailer_pointing_at(&server);
+
+    let job = SendNotificationEmailJob {
+        notification_id: receipt,
+    };
+    assert!(job.run(state.clone()).await.is_err());
+
+    let outcome: Option<String> =
+        sqlx::query_scalar("SELECT outcome FROM notification_emails WHERE notification_id = $1")
+            .bind(receipt)
+            .fetch_one(&pool)
+            .await?;
+    assert!(
+        outcome.is_none(),
+        "transient failure keeps outcome NULL for retry"
+    );
+    let logs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_log")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(logs, 1, "the failed attempt still logged and spent budget");
+
+    // Recovery: wiremock matches the lowest priority number first (ties by
+    // insertion order), so the 200 mock needs `.with_priority(1)` to beat
+    // the already-mounted 503; the retry then sends successfully.
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    job.run(state).await?;
+    let outcome: Option<String> =
+        sqlx::query_scalar("SELECT outcome FROM notification_emails WHERE notification_id = $1")
+            .bind(receipt)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(outcome.as_deref(), Some("sent"));
+    let requests = server.received_requests().await.expect("wiremock requests");
+    assert_eq!(requests.len(), 2);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn sustained_transient_failure_ends_rate_limited_after_the_cap(
+    pool: PgPool,
+) -> cja::Result<()> {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    // Exactly five requests may reach the mock: the hourly cap (default 5
+    // in the test config) bounds the retries.
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(5)
+        .mount(&server)
+        .await;
+    let receipt = paused_notification(&pool, "rate-limited-terminal", 1673009).await?;
+    let mut state = AppState::test_from_pool(pool.clone());
+    state.mailer = mailer_pointing_at(&server);
+
+    let job = SendNotificationEmailJob {
+        notification_id: receipt,
+    };
+    // Five attempts, each a transient 503 that leaves outcome NULL.
+    for _ in 0..5 {
+        assert!(job.run(state.clone()).await.is_err());
+    }
+    let outcome: Option<String> =
+        sqlx::query_scalar("SELECT outcome FROM notification_emails WHERE notification_id = $1")
+            .bind(receipt)
+            .fetch_one(&pool)
+            .await?;
+    assert!(outcome.is_none());
+
+    // The sixth attempt is suppressed by the cap before any HTTP call and
+    // terminally resolves as rate_limited.
+    job.run(state.clone()).await?;
+    let row = sqlx::query_as::<_, (Option<String>, bool)>(
+        "SELECT outcome, finished_at IS NOT NULL FROM notification_emails WHERE notification_id = $1",
+    )
+    .bind(receipt)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(row.0.as_deref(), Some("rate_limited"));
+    assert!(row.1);
+
+    // Terminal: further runs spend nothing.
+    job.run(state).await?;
+    let requests = server.received_requests().await.expect("wiremock requests");
+    assert_eq!(requests.len(), 5);
+    Ok(())
+}
+
+/// A matchmaking-paused notification addressed to the owner's confirmed
+/// email — the simplest shape that reaches `send_limited`.
+async fn paused_notification(
+    pool: &sqlx::PgPool,
+    login: &str,
+    github_id: i64,
+) -> cja::Result<Uuid> {
+    use crate::notifications::{EmailRecipient, NewEmail, NewNotification, NotificationKind};
+
+    let user_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (external_github_id, github_login, github_email, notification_email) VALUES ($2, $1, $3, $3) RETURNING user_id",
+    )
+    .bind(login)
+    .bind(github_id)
+    .bind(format!("{login}@example.com"))
+    .fetch_one(pool)
+    .await?;
+    let receipt = crate::notifications::record(
+        pool,
+        NewNotification {
+            user_id,
+            kind: NotificationKind::SnakeMatchmakingPaused,
+            title: "Paused".into(),
+            body: "Unhealthy".into(),
+            link: None,
+            email: Some(NewEmail {
+                subject: Some("Paused".into()),
+                text: Some("body".into()),
+                html_body: Some("<p>body</p>".into()),
+                recipient: EmailRecipient::User,
+                claim_imported_account_id: None,
+                notification_email_request_id: None,
+            }),
+        },
+    )
+    .await?;
+    Ok(receipt.notification_id)
+}
+
+fn mailer_pointing_at(server: &wiremock::MockServer) -> crate::email::Mailer {
+    crate::email::Mailer::new(
+        Some(crate::email::MailgunConfig {
+            api_key: "test".into(),
+            domain: "mg.example.com".into(),
+            from: "Arena <reply@example.com>".into(),
+            base_url: server.uri(),
+        }),
+        reqwest::Client::new(),
+    )
 }
 
 #[sqlx::test(migrations = "../migrations")]
@@ -1558,7 +2572,7 @@ async fn confirmation_uses_hashed_single_use_link_and_user_mail_uses_confirmed_a
         .expect(6)
         .mount(&server)
         .await;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1674091, 'confirmation-job-test', '', 'public@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_email) VALUES (1674091, 'confirmation-job-test', 'public@example.com') RETURNING user_id").fetch_one(&pool).await?;
     let mut state = AppState::test_from_pool(pool.clone());
     state.mailer = Mailer::new(
         Some(MailgunConfig {
@@ -1760,7 +2774,7 @@ async fn confirmation_actual_send_budget_blocks_sixth_delayed_request(
         .expect(5)
         .mount(&server)
         .await;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (1674092, 'confirmation-cap-test', '') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login) VALUES (1674092, 'confirmation-cap-test') RETURNING user_id").fetch_one(&pool).await?;
     let mut state = AppState::test_from_pool(pool.clone());
     state.mailer = Mailer::new(
         Some(MailgunConfig {
@@ -1839,7 +2853,7 @@ async fn confirmation_transport_error_rolls_back_secret_and_retry_mints_another(
         .expect(2)
         .mount(&server)
         .await;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (1674094, 'confirmation-retry-test', '') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login) VALUES (1674094, 'confirmation-retry-test') RETURNING user_id").fetch_one(&pool).await?;
     let mut tx = pool.begin().await?;
     let (request_id, notification_id) =
         match notification_email::request_confirmation(&mut tx, user_id, "retry@example.com")

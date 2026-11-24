@@ -29,8 +29,8 @@ impl Fixture {
     /// viewer who also has a display name.
     async fn new(pool: PgPool) -> Self {
         let owner_id = sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token, display_name)
-             VALUES (9940001, 'gh-display', 'token', 'Display Person') RETURNING user_id"
+            "INSERT INTO users (external_github_id, github_login, display_name)
+             VALUES (9940001, 'gh-display', 'Display Person') RETURNING user_id"
         )
         .fetch_one(&pool)
         .await

@@ -68,11 +68,15 @@ pub trait ScoringAlgorithm: Send + Sync {
     async fn initialize_entry(&self, pool: &PgPool, leaderboard_entry_id: Uuid) -> cja::Result<()>;
 
     /// Process a completed game. Called within a transaction.
+    /// Returns `true` when the game was applied (or there was nothing to
+    /// apply), `false` when it was already applied by a concurrent run —
+    /// the caller must roll back the transaction (not commit) when any
+    /// algorithm returns `false`.
     async fn process_game_result(
         &self,
         conn: &mut sqlx::PgConnection,
         event: &GameResultEvent,
-    ) -> cja::Result<()>;
+    ) -> cja::Result<bool>;
 
     /// Batch fetch scores for the given entry IDs.
     /// Callers are responsible for pagination/filtering — this just looks up scores
@@ -111,6 +115,15 @@ impl ScoringRegistry {
             .find(|a| a.key() == key)
             .map(|a| a.as_ref())
     }
+}
+
+/// The production registry: every algorithm a leaderboard entry is scored by.
+pub fn default_registry() -> ScoringRegistry {
+    let mut registry = ScoringRegistry::new();
+    registry.register(Box::new(weng_lin::WengLinScoring));
+    registry.register(Box::new(win_rate::WinRateScoring));
+    registry.register(Box::new(food_eaten::FoodEatenScoring));
+    registry
 }
 
 pub mod food_eaten;
@@ -153,8 +166,8 @@ mod tests {
             &self,
             _conn: &mut sqlx::PgConnection,
             _event: &GameResultEvent,
-        ) -> cja::Result<()> {
-            Ok(())
+        ) -> cja::Result<bool> {
+            Ok(true)
         }
 
         async fn get_scores(

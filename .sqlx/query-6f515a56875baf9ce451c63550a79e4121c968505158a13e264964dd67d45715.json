@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO leaderboards (name) VALUES ('decoupled') RETURNING leaderboard_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "leaderboard_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6f515a56875baf9ce451c63550a79e4121c968505158a13e264964dd67d45715"
+}

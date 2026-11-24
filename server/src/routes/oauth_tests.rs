@@ -213,6 +213,41 @@ impl Fixture {
         (status, location, body)
     }
 
+    /// post_decision, but authenticated as a specific session id (the
+    /// decision test rotates the session mid-test, DEV-2185).
+    async fn post_decision_as(
+        &self,
+        session_id: Uuid,
+        fields: &[(&str, &str)],
+    ) -> (StatusCode, Option<String>, String) {
+        let body = form_encode(fields);
+        let cookie = format!(
+            "{}={}",
+            crate::models::session::SESSION_COOKIE_NAME,
+            signed_session_cookie(&self.state, session_id)
+        );
+        let response = self
+            .app
+            .clone()
+            .oneshot(
+                Request::post("/oauth/authorize/decision")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let location = headers
+            .get(header::LOCATION)
+            .and_then(|l| l.to_str().ok())
+            .map(str::to_string);
+        let body = body_string(response).await;
+        (status, location, body)
+    }
+
     /// Approve with a valid CSRF and the given scope/snakes; returns the raw
     /// code from the redirect.
     async fn approve(
@@ -700,7 +735,7 @@ async fn decision_rejects_missing_or_forged_csrf(pool: PgPool) {
 
 #[sqlx::test(migrations = "../migrations")]
 async fn decision_rejects_consent_minted_for_another_user(pool: PgPool) {
-    use crate::models::session::{associate_user_with_session, disassociate_user_from_session};
+    use crate::models::session::rotate_session;
 
     let fx = Fixture::new(&pool).await;
     let (_verifier, challenge) = make_verifier_pair();
@@ -709,15 +744,12 @@ async fn decision_rejects_consent_minted_for_another_user(pool: PgPool) {
     // The consent token is minted (rendered) for user A on session S.
     let csrf = fx.consent_csrf(&challenge, scope);
 
-    // A logs out and B logs in on the same browser: logout only
-    // disassociates the user, the session id survives.
+    // A logs out and B logs in on the same browser: logout keeps the row
+    // anonymous, and B's login rotates it to a fresh session (DEV-2185) —
+    // so A's consent csrf, minted for (A, old session), is doubly stale
+    // for B on the new row.
     let user_b = crate::routes::test_support::create_user(&pool, 9922021, false).await;
-    disassociate_user_from_session(&pool, fx.session_id)
-        .await
-        .unwrap();
-    associate_user_with_session(&pool, fx.session_id, user_b)
-        .await
-        .unwrap();
+    let bob_session = rotate_session(&pool, fx.session_id, user_b).await.unwrap();
 
     // B posts A's form fields and csrf: the token is bound to A's user id,
     // so verification fails — the no-redirect error page, no code minted
@@ -733,7 +765,7 @@ async fn decision_rejects_consent_minted_for_another_user(pool: PgPool) {
         ("snake_access", "all".to_string()),
     ];
     let refs: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    let (status, location, body) = fx.post_decision(&refs).await;
+    let (status, location, body) = fx.post_decision_as(bob_session.session_id, &refs).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(location.is_none(), "must never redirect");
 
@@ -3428,7 +3460,7 @@ mod resume {
             )
         }
 
-        async fn login_round_trip(&self, with_marker: bool) -> Option<String> {
+        async fn login_round_trip(&mut self, with_marker: bool) -> Option<String> {
             // The initiator (with or without the resume marker).
             let initiate = if with_marker {
                 "/auth/github?resume=true"
@@ -3470,6 +3502,21 @@ mod resume {
                 .await
                 .unwrap();
             if response.status() == StatusCode::SEE_OTHER {
+                // DEV-2185: login rotates the session. Follow it so the
+                // next round primes state on the row the browser now
+                // holds (the ORDER BY keeps the follow deterministic
+                // regardless of surviving rows).
+                self.session_id = sqlx::query_scalar!(
+                    "SELECT s.session_id FROM sessions s
+                     JOIN users u ON u.user_id = s.user_id
+                     WHERE u.external_github_id = $1
+                     ORDER BY s.created_at DESC
+                     LIMIT 1",
+                    424299_i64
+                )
+                .fetch_one(&self.pool)
+                .await
+                .unwrap();
                 response
                     .headers()
                     .get(header::LOCATION)
@@ -3484,7 +3531,7 @@ mod resume {
     #[sqlx::test(migrations = "../migrations")]
     async fn login_resume_returns_to_authorize(pool: PgPool) {
         let github = github_mocks().await;
-        let fx = ResumeFixture::new(pool.clone(), &github).await;
+        let mut fx = ResumeFixture::new(pool.clone(), &github).await;
         let client = make_client(&pool, "Resume Client", &[REDIRECT_URI]).await;
         let (_verifier, challenge) = make_verifier_pair();
         let authorize_uri = authorize_uri(
@@ -3542,7 +3589,7 @@ mod resume {
     #[sqlx::test(migrations = "../migrations")]
     async fn stale_resume_is_cleared_by_normal_login(pool: PgPool) {
         let github = github_mocks().await;
-        let fx = ResumeFixture::new(pool.clone(), &github).await;
+        let mut fx = ResumeFixture::new(pool.clone(), &github).await;
         let client = make_client(&pool, "Resume Client", &[REDIRECT_URI]).await;
         let (_verifier, challenge) = make_verifier_pair();
         let authorize_uri = authorize_uri(
@@ -3574,7 +3621,7 @@ mod resume {
     #[sqlx::test(migrations = "../migrations")]
     async fn welcome_back_login_returns_to_welcome_back(pool: PgPool) {
         let github = github_mocks().await;
-        let fx = ResumeFixture::new(pool.clone(), &github).await;
+        let mut fx = ResumeFixture::new(pool.clone(), &github).await;
 
         // A signed-out visit parks /welcome-back on the session…
         let response = fx
@@ -3598,7 +3645,7 @@ mod resume {
     #[sqlx::test(migrations = "../migrations")]
     async fn saved_paths_outside_the_allowlist_are_not_resumed(pool: PgPool) {
         let github = github_mocks().await;
-        let fx = ResumeFixture::new(pool.clone(), &github).await;
+        let mut fx = ResumeFixture::new(pool.clone(), &github).await;
 
         for path in [
             "/me",

@@ -116,7 +116,7 @@ impl ScoringAlgorithm for WengLinScoring {
         &self,
         conn: &mut sqlx::PgConnection,
         event: &GameResultEvent,
-    ) -> cja::Result<()> {
+    ) -> cja::Result<bool> {
         // Lock weng_lin_ratings rows and read current mu/sigma
         let entry_ids: Vec<Uuid> = event
             .results
@@ -151,6 +151,8 @@ impl ScoringAlgorithm for WengLinScoring {
             let entry = LeaderboardEntry {
                 leaderboard_entry_id: result.leaderboard_entry_id,
                 leaderboard_id: event.leaderboard_id,
+                // Not used by calculate_rating_updates (the event carries no season).
+                season_id: Uuid::nil(),
                 battlesnake_id: result.battlesnake_id,
                 disabled_reason: None,
                 mu,
@@ -168,7 +170,7 @@ impl ScoringAlgorithm for WengLinScoring {
         }
 
         if entries_with_placements.len() < 2 {
-            return Ok(());
+            return Ok(true);
         }
 
         let updates = calculate_rating_updates(&entries_with_placements);
@@ -202,7 +204,7 @@ impl ScoringAlgorithm for WengLinScoring {
             .wrap_err("Failed to write-through to leaderboard_entries")?;
 
             // Record audit trail
-            leaderboard::create_game_result(
+            let result = leaderboard::create_game_result(
                 &mut *conn,
                 leaderboard::CreateGameResult {
                     leaderboard_game_id: event.leaderboard_game_id,
@@ -217,9 +219,17 @@ impl ScoringAlgorithm for WengLinScoring {
             )
             .await
             .wrap_err("Failed to create game result record")?;
+
+            // A concurrent run already recorded this game's results. Every
+            // write this transaction has made so far must be discarded:
+            // signal the caller to roll back instead of committing a
+            // second application of the counters (DEV-2174).
+            if result.is_none() {
+                return Ok(false);
+            }
         }
 
-        Ok(())
+        Ok(true)
     }
 
     async fn get_scores(&self, pool: &PgPool, entry_ids: &[Uuid]) -> cja::Result<Vec<EntryScore>> {
@@ -282,6 +292,7 @@ mod tests {
         LeaderboardEntry {
             leaderboard_entry_id: Uuid::new_v4(),
             leaderboard_id: Uuid::new_v4(),
+            season_id: Uuid::new_v4(),
             battlesnake_id: Uuid::new_v4(),
             mu,
             sigma,

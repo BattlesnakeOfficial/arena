@@ -1,0 +1,60 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT g.game_id AS \"game_id!\", g.status AS \"status!\", (SELECT MAX(t.turn_number) FROM turns t WHERE t.game_id = g.game_id) AS latest_turn,\n                      c.turn_id AS \"cursor_turn_id?\"\n               FROM unnest($1::uuid[], $2::int[]) AS w(game_id, last_turn)\n               JOIN games g ON g.game_id = w.game_id\n               LEFT JOIN turns c ON c.game_id = w.game_id AND c.turn_number = w.last_turn",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_id!",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "games",
+            "name": "game_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "status!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "games",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "latest_turn",
+        "type_info": "Int4",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "cursor_turn_id?",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "turns",
+            "name": "turn_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Int4Array"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      null,
+      false
+    ]
+  },
+  "hash": "a9c97f0f4b535cc8cc3be2ee1ca2fa0c0a01780041f32e22cdc687ed2f772861"
+}

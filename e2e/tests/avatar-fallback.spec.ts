@@ -1,5 +1,5 @@
 import { test, expect } from '../fixtures/test';
-import { query } from '../fixtures/db';
+import { query, registerFixtureEntries } from '../fixtures/db';
 
 async function expectFallback(page: import('@playwright/test').Page, selector: string, initial: string) {
   const avatar = page.locator(selector);
@@ -53,10 +53,11 @@ test('failed avatars fall back on every user-avatar surface', async ({ authentic
     );
     leaderboardId = leaderboard.leaderboard_id;
     const [entry] = await query<{ leaderboard_entry_id: string }>(
-      `INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-       VALUES ($1, $2) RETURNING leaderboard_entry_id`,
+      `INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+       VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2) RETURNING leaderboard_entry_id`,
       [leaderboard.leaderboard_id, snake.battlesnake_id],
     );
+    await registerFixtureEntries();
     entryId = entry.leaderboard_entry_id;
 
     await authenticatedPage.goto(

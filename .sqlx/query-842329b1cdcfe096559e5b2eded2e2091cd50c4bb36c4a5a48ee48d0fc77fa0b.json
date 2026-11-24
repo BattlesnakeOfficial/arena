@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE games SET gcs_path = $2, archive_version = 1\n            WHERE engine_game_id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "842329b1cdcfe096559e5b2eded2e2091cd50c4bb36c4a5a48ee48d0fc77fa0b"
+}

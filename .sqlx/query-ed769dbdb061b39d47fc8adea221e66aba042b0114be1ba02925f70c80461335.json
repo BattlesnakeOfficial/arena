@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT engine_game_id FROM dropped_fields_repair_queue",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "engine_game_id",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ed769dbdb061b39d47fc8adea221e66aba042b0114be1ba02925f70c80461335"
+}

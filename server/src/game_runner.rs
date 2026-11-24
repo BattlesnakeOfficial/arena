@@ -1,11 +1,11 @@
 use color_eyre::eyre::Context as _;
-use rules::{Direction, EliminationCause};
+use rules::Direction;
 use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::customizations;
 use crate::engine::MAX_TURNS;
-use crate::engine::frame::{DeathInfo, SnakeCustomizations, game_to_frame};
+use crate::engine::frame::{SnakeCustomizations, game_to_frame};
 use crate::game_progress::{Phase, phase};
 use crate::models::game::{
     GameStatus, StartClaim, claim_game_start, get_game_by_id, get_game_source,
@@ -318,7 +318,6 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         .await?;
 
     let mut engine_game: crate::engine::EngineGame;
-    let mut death_info: Vec<DeathInfo>;
     let mut food_eaten: HashMap<String, i32>;
     let mut last_moves: HashMap<String, Direction>;
     let mut snake_contexts: HashMap<String, wire::SnakeContext>;
@@ -343,7 +342,6 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
             );
             engine_game.meta.source = game_source;
 
-            death_info = Vec::new();
             food_eaten = HashMap::new();
             last_moves = HashMap::new();
             snake_contexts = HashMap::new();
@@ -373,12 +371,11 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
 
             // Store turn 0 (initial state, no moves yet) atomically with
             // its (empty) resume snapshot, so even turn 0 is resumable.
-            let frame_0 = game_to_frame(&engine_game, &death_info, &[], &customizations);
+            let frame_0 = game_to_frame(&engine_game, &[], &customizations);
             let frame_0_json =
                 serde_json::to_value(&frame_0).wrap_err("Failed to serialize initial frame")?;
             let resume_0 = crate::engine::resume::capture_resume_state(
                 &engine_game,
-                &death_info,
                 &food_eaten,
                 &last_moves,
                 &snake_contexts,
@@ -398,7 +395,6 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
             // state (source already set by restore).
             let state = *state;
             engine_game = state.engine_game;
-            death_info = state.death_info;
             food_eaten = state.food_eaten;
             last_moves = state.last_moves;
             snake_contexts = state.snake_contexts;
@@ -413,7 +409,10 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     let mut total_snake_wait = std::time::Duration::ZERO;
 
     // Run the game turn by turn
-    while !crate::engine::is_game_over(&engine_game) && engine_game.board.turn < MAX_TURNS {
+    let stop: crate::engine::StopReason = loop {
+        if let Some(reason) = crate::engine::stop_reason(&engine_game, Some(MAX_TURNS)) {
+            break reason;
+        }
         // Request moves from all alive snakes in parallel
         let move_wait_start = std::time::Instant::now();
         let move_results = phase(
@@ -441,23 +440,21 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         apply_turn_results(
             &mut engine_game,
             &move_results,
-            &mut death_info,
             &mut food_eaten,
             &mut last_moves,
             &mut snake_contexts,
         )?;
 
         // Store the turn frame with latency info and notify subscribers
-        let frame = game_to_frame(&engine_game, &death_info, &move_results, &customizations);
+        let frame = game_to_frame(&engine_game, &move_results, &customizations);
         let frame_json = serde_json::to_value(&frame)
             .wrap_err_with(|| format!("Failed to serialize frame {}", engine_game.board.turn))?;
 
-        // Captured after apply_turn_results, i.e. after the maps and
-        // death_info are updated — the restored maps are exactly what an
-        // uninterrupted run would hold at this turn.
+        // Captured after apply_turn_results, i.e. after the maps are
+        // updated — the restored maps are exactly what an uninterrupted run
+        // would hold at this turn.
         let resume = crate::engine::resume::capture_resume_state(
             &engine_game,
-            &death_info,
             &food_eaten,
             &last_moves,
             &snake_contexts,
@@ -470,8 +467,8 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                         game_battlesnake_id: id,
                         direction: result.direction.to_string(),
                         latency_ms: result.latency_ms,
-                        timed_out: result.timed_out,
-                        errored: result.errored,
+                        timed_out: result.outcome.timed_out(),
+                        errored: result.outcome.errored(),
                     }
                 })
             })
@@ -518,7 +515,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
             duration_us = yield_duration.as_micros() as u64,
             "async scheduler jitter"
         );
-    }
+    };
 
     // Emit processing_overhead metric
     let total_time = game_start.elapsed();
@@ -651,6 +648,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         event_type = "game_completed",
         game_id = %game_id,
         final_turn = engine_game.board.turn,
+        stop_reason = stop.as_str(),
         total_ms = total_time_ms,
         winner_battlesnake_id = ?winner_snake_id,
         source = game_source.analytics_label(),
@@ -673,13 +671,12 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
 
 /// Apply one turn's move results exactly as the live loop does: update
 /// last_moves and snake_contexts from the results, advance the engine,
-/// record food eaten, and append newly eliminated snakes to death_info.
-/// Shared by run_game's turn loop and the resume test fixtures so the
-/// "interrupted run" the fixtures build cannot drift from the real loop.
+/// and record food eaten. Shared by run_game's turn loop and the resume
+/// test fixtures so the "interrupted run" the fixtures build cannot drift
+/// from the real loop.
 pub(crate) fn apply_turn_results(
     engine_game: &mut crate::engine::EngineGame,
     move_results: &[crate::snake_client::MoveResult],
-    death_info: &mut Vec<DeathInfo>,
     food_eaten: &mut HashMap<String, i32>,
     last_moves: &mut HashMap<String, Direction>,
     snake_contexts: &mut HashMap<String, wire::SnakeContext>,
@@ -697,7 +694,7 @@ pub(crate) fn apply_turn_results(
             wire::SnakeContext {
                 latency_ms: wire::reported_latency_ms(
                     result.latency_ms,
-                    result.timed_out,
+                    result.outcome.timed_out(),
                     engine_game.meta.timeout,
                 ),
                 shout: result.shout.clone(),
@@ -715,20 +712,6 @@ pub(crate) fn apply_turn_results(
     let fed = crate::engine::advance_turn(engine_game, &moves)?;
     for snake_id in fed {
         *food_eaten.entry(snake_id).or_default() += 1;
-    }
-
-    // Track newly eliminated snakes
-    for snake in &engine_game.board.snakes {
-        if snake.eliminated_cause.is_eliminated()
-            && !death_info.iter().any(|death| death.snake_id == snake.id)
-        {
-            death_info.push(DeathInfo {
-                snake_id: snake.id.clone(),
-                turn: engine_game.board.turn,
-                cause: elimination_cause_label(&snake.eliminated_cause),
-                eliminated_by: snake.eliminated_by.clone(),
-            });
-        }
     }
 
     Ok(())
@@ -851,19 +834,6 @@ async fn enqueue_post_completion_jobs(app_state: &AppState, game_id: Uuid) -> cj
     .wrap_err("Failed to enqueue shout screening job")?;
 
     Ok(())
-}
-
-/// Human-readable label for an elimination cause, used in frame data.
-fn elimination_cause_label(cause: &EliminationCause) -> String {
-    match cause {
-        EliminationCause::NotEliminated => String::new(),
-        EliminationCause::OutOfHealth => "out-of-health".to_string(),
-        EliminationCause::OutOfBounds => "wall-collision".to_string(),
-        EliminationCause::SelfCollision => "self-collision".to_string(),
-        EliminationCause::Collision => "snake-collision".to_string(),
-        EliminationCause::HeadToHeadCollision => "head-collision".to_string(),
-        EliminationCause::Hazard => "hazard".to_string(),
-    }
 }
 
 #[cfg(test)]
@@ -1016,8 +986,8 @@ mod tests {
             .await;
 
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (1626, 'completion-test', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (1626, 'completion-test') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -1176,8 +1146,8 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn busy_ladder_runner_makes_no_turns(pool: PgPool) -> cja::Result<()> {
         let owner = sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (161302, 'runner-owner', 'test') RETURNING user_id"
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (161302, 'runner-owner') RETURNING user_id"
         )
         .fetch_one(&pool)
         .await?;
@@ -1205,7 +1175,7 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         sqlx::query!(
-            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))",
             leaderboard,
             waiting
         )
@@ -1244,8 +1214,8 @@ mod tests {
     /// (owner, battlesnake_id, game_id).
     async fn ladder_fixture(pool: &PgPool, snake_url: &str) -> cja::Result<(Uuid, Uuid, Uuid)> {
         let owner = sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (1731, 'lifecycle-owner', 'test') RETURNING user_id"
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (1731, 'lifecycle-owner') RETURNING user_id"
         )
         .fetch_one(pool)
         .await?;
@@ -1263,13 +1233,14 @@ mod tests {
         .fetch_one(pool)
         .await?;
         let entry = sqlx::query_scalar!(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-             VALUES ($1, $2) RETURNING leaderboard_entry_id",
+            "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+             VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2) RETURNING leaderboard_entry_id",
             leaderboard,
             battlesnake_id
         )
         .fetch_one(pool)
         .await?;
+        crate::routes::test_support::register_snake_entries(pool, battlesnake_id).await;
         let game_id: Uuid = sqlx::query_scalar(
             "INSERT INTO games (board_size, game_type, status)
              VALUES ('11x11', 'Standard', 'waiting') RETURNING game_id",
@@ -1284,7 +1255,7 @@ mod tests {
         .execute(pool)
         .await?;
         sqlx::query!(
-            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))",
             leaderboard,
             game_id
         )
@@ -1403,8 +1374,8 @@ mod tests {
             .mount(&snake_server)
             .await;
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (1627, 'custom-source-test', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (1627, 'custom-source-test') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -1449,8 +1420,8 @@ mod tests {
 
         // Minimal tournament scaffolding for a match_games row.
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (424242, 'test-user', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (424242, 'test-user') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -1609,8 +1580,8 @@ mod tests {
         let app_state = crate::state::AppState::test_from_pool(pool.clone());
         let game_id = fixture_game(&pool, "waiting").await?;
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (424242, 'test-user', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (424242, 'test-user') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -1619,7 +1590,7 @@ mod tests {
         )
         .fetch_one(&pool)
         .await?;
-        sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
+        sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))")
             .bind(leaderboard_id)
             .bind(game_id)
             .execute(&pool)
@@ -1773,8 +1744,8 @@ mod tests {
         let game_id = fixture_game(&pool, "running").await?;
 
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (424242, 'test-user', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (424242, 'test-user') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -1871,8 +1842,8 @@ mod tests {
     async fn finished_game_records_food_eaten(pool: PgPool) -> cja::Result<()> {
         let app_state = crate::state::AppState::test_from_pool(pool.clone());
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (233, 'food-test', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (233, 'food-test') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -1981,8 +1952,8 @@ mod tests {
         scripts: &[ScriptedSnake],
     ) -> cja::Result<(Uuid, Vec<wiremock::MockServer>)> {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (15691, 'resume-owner', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (15691, 'resume-owner') RETURNING user_id",
         )
         .fetch_one(pool)
         .await?;
@@ -2047,7 +2018,6 @@ mod tests {
         );
         engine_game.meta.source = game_source;
 
-        let mut death_info: Vec<DeathInfo> = Vec::new();
         let mut food_eaten: HashMap<String, i32> = HashMap::new();
         let mut last_moves: HashMap<String, Direction> = HashMap::new();
         let mut snake_contexts: HashMap<String, wire::SnakeContext> = HashMap::new();
@@ -2067,10 +2037,9 @@ mod tests {
             .collect();
 
         // Turn 0, exactly like the Fresh path persists it.
-        let frame_0 = game_to_frame(&engine_game, &death_info, &[], &customizations);
+        let frame_0 = game_to_frame(&engine_game, &[], &customizations);
         let resume_0 = crate::engine::resume::capture_resume_state(
             &engine_game,
-            &death_info,
             &food_eaten,
             &last_moves,
             &snake_contexts,
@@ -2087,8 +2056,8 @@ mod tests {
 
         loop {
             if until_game_over {
-                if crate::engine::is_game_over(&engine_game)
-                    || engine_game.board.turn >= crate::engine::MAX_TURNS
+                if crate::engine::stop_reason(&engine_game, Some(crate::engine::MAX_TURNS))
+                    .is_some()
                 {
                     break;
                 }
@@ -2117,26 +2086,22 @@ mod tests {
                     snake_id: id,
                     direction,
                     latency_ms: Some(50 + i as i64),
-                    timed_out: false,
                     shout: None,
-                    status_code: Some(200),
-                    errored: false,
+                    outcome: crate::snake_client::MoveOutcome::Ok { status_code: 200 },
                 });
             }
 
             apply_turn_results(
                 &mut engine_game,
                 &results,
-                &mut death_info,
                 &mut food_eaten,
                 &mut last_moves,
                 &mut snake_contexts,
             )?;
 
-            let frame = game_to_frame(&engine_game, &death_info, &results, &customizations);
+            let frame = game_to_frame(&engine_game, &results, &customizations);
             let resume = crate::engine::resume::capture_resume_state(
                 &engine_game,
-                &death_info,
                 &food_eaten,
                 &last_moves,
                 &snake_contexts,
@@ -2149,8 +2114,8 @@ mod tests {
                             game_battlesnake_id: id,
                             direction: result.direction.to_string(),
                             latency_ms: result.latency_ms,
-                            timed_out: result.timed_out,
-                            errored: result.errored,
+                            timed_out: result.outcome.timed_out(),
+                            errored: result.outcome.errored(),
                         }
                     })
                 })

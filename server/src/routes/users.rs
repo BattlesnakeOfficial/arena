@@ -174,6 +174,9 @@ async fn render_user_profile(
                                             a href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} {
                                                 (snake.name)
                                             }
+                                            @if snake.retired_at.is_some() {
+                                                " " span class="live-pill quiet" { "Retired" }
+                                            }
                                             @if snake.visibility == Visibility::Private {
                                                 " "
                                                 span class="live-pill quiet" { "Private" }
@@ -189,8 +192,14 @@ async fn render_user_profile(
                                         @for entry in entries {
                                             div {
                                                 dt {
-                                                    a href={"/leaderboards/"(entry.leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
-                                                        (entry.leaderboard_name)
+                                                    @if let Some(entry_id) = entry.leaderboard_entry_id {
+                                                        a href={"/leaderboards/"(entry.leaderboard_id)"/entries/"(entry_id)} {
+                                                            (entry.leaderboard_name)
+                                                        }
+                                                    } @else {
+                                                        a href={"/leaderboards/"(entry.leaderboard_id)} {
+                                                            (entry.leaderboard_name)
+                                                        }
                                                     }
                                                     @if entry.leaderboard_visibility == Visibility::Private {
                                                         " "
@@ -198,8 +207,12 @@ async fn render_user_profile(
                                                     }
                                                 }
                                                 dd {
-                                                    (format!("{:.1}", entry.display_score))
-                                                    " · " (entry.games_played) " games"
+                                                    @if let Some(score) = entry.display_score {
+                                                        (format!("{score:.1}"))
+                                                    } @else {
+                                                        "—"
+                                                    }
+                                                    " · " (entry.games_played.unwrap_or(0)) " games"
                                                     @if entry.disabled_at.is_some() {
                                                         " · paused"
                                                     }
@@ -845,7 +858,7 @@ mod tests {
 
     async fn profile_user(pool: &PgPool, github_id: i64) -> Uuid {
         sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES ($1, $2, '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login) VALUES ($1, $2) RETURNING user_id",
         )
         .bind(github_id)
         .bind(format!("profile-ach-{github_id}"))
@@ -1176,6 +1189,7 @@ mod tests {
         let entry = crate::models::leaderboard::get_or_create_entry(&pool, private_lb, rival_snake)
             .await
             .unwrap()
+            .expect("live snake joins")
             .leaderboard_entry_id;
         profile_participant(&pool, game_id, owner_snake, 1, None).await;
         profile_participant(&pool, game_id, rival_snake, 2, Some(entry)).await;

@@ -410,19 +410,19 @@ mod tests {
         .await
         .unwrap();
         let first = sqlx::query_scalar!(
-            "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (101, 'tracked-first', '') RETURNING user_id"
+            "INSERT INTO users(external_github_id, github_login) VALUES (101, 'tracked-first') RETURNING user_id"
         )
         .fetch_one(&db)
         .await
         .unwrap();
         let second = sqlx::query_scalar!(
-            "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (102, 'tracked-second', '') RETURNING user_id"
+            "INSERT INTO users(external_github_id, github_login) VALUES (102, 'tracked-second') RETURNING user_id"
         )
         .fetch_one(&db)
         .await
         .unwrap();
         let pre_tracking_only = sqlx::query_scalar!(
-            "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (103, 'pre-tracking-only', '') RETURNING user_id"
+            "INSERT INTO users(external_github_id, github_login) VALUES (103, 'pre-tracking-only') RETURNING user_id"
         )
         .fetch_one(&db)
         .await
@@ -542,10 +542,10 @@ mod tests {
         sqlx::query!("UPDATE stats_tracking_start SET tracking_started_at = '2026-08-01 00:00+00' WHERE singleton = TRUE")
             .execute(&db).await.unwrap();
         let u1 = sqlx::query_scalar!(
-            "INSERT INTO users(external_github_id, github_login, github_access_token, created_at) VALUES (1, 'u1-secret', '', '2026-09-20 23:59:59+00') RETURNING user_id"
+            "INSERT INTO users(external_github_id, github_login, created_at) VALUES (1, 'u1-secret', '2026-09-20 23:59:59+00') RETURNING user_id"
         ).fetch_one(&db).await.unwrap();
         let u2 = sqlx::query_scalar!(
-            "INSERT INTO users(external_github_id, github_login, github_access_token, created_at) VALUES (2, 'u2-secret', '', '2026-09-21 00:00:00+00') RETURNING user_id"
+            "INSERT INTO users(external_github_id, github_login, created_at) VALUES (2, 'u2-secret', '2026-09-21 00:00:00+00') RETURNING user_id"
         ).fetch_one(&db).await.unwrap();
         let s1 = sqlx::query_scalar!(
             "INSERT INTO battlesnakes(user_id, name, url, created_at) VALUES ($1, 's1-secret', 'https://example.com', '2026-09-20 23:59:59+00') RETURNING battlesnake_id", u1
@@ -564,9 +564,10 @@ mod tests {
         .await
         .unwrap();
         let entry_id = sqlx::query_scalar!(
-            "INSERT INTO leaderboard_entries(leaderboard_id, battlesnake_id) VALUES ($1, $2) RETURNING leaderboard_entry_id",
+            "INSERT INTO leaderboard_entries(leaderboard_id, season_id, battlesnake_id) VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2) RETURNING leaderboard_entry_id",
             leaderboard_id, s2
         ).fetch_one(&db).await.unwrap();
+        crate::routes::test_support::register_snake_entries(&db, s2).await;
         let tournament_id = sqlx::query_scalar!(
             "INSERT INTO tournaments(name, user_id) VALUES ('Test', $1) RETURNING tournament_id",
             u1
@@ -592,7 +593,7 @@ mod tests {
             "INSERT INTO games(board_size, game_type, status, created_at) VALUES ('11x11', 'Standard', 'finished', '2026-09-27 23:59:59+00') RETURNING game_id"
         ).fetch_one(&db).await.unwrap();
         sqlx::query!(
-            "INSERT INTO leaderboard_games(leaderboard_id, game_id) VALUES ($1, $2), ($1, $3)",
+            "INSERT INTO leaderboard_games(leaderboard_id, game_id, season_id) SELECT $1, g, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1) FROM unnest(ARRAY[$2::uuid, $3::uuid]) AS g",
             leaderboard_id,
             leaderboard,
             double_linked

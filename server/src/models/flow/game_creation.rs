@@ -265,6 +265,7 @@ impl GameCreationFlow {
                 WHERE battlesnake_id = $1
                   AND (user_id = $2 OR visibility = 'public')
                   AND deleted_at IS NULL
+                  AND retired_at IS NULL
             ) AS "eligible!""#,
             battlesnake_id,
             user_id
@@ -433,9 +434,11 @@ impl GameCreationFlow {
 
     // Get all battlesnakes for the current user
     pub async fn get_user_battlesnakes(&self, pool: &PgPool) -> cja::Result<Vec<Battlesnake>> {
-        battlesnake::get_battlesnakes_by_user_id(pool, self.user_id)
+        let mut snakes = battlesnake::get_battlesnakes_by_user_id(pool, self.user_id)
             .await
-            .wrap_err("Failed to get user's battlesnakes")
+            .wrap_err("Failed to get user's battlesnakes")?;
+        snakes.retain(|snake| snake.retired_at.is_none());
+        Ok(snakes)
     }
 
     // Get details of the selected battlesnakes
@@ -460,11 +463,14 @@ impl GameCreationFlow {
                 head,
                 tail,
                 created_at,
-                updated_at
+                updated_at,
+                retired_at,
+                allow_tournament_import
             FROM battlesnakes
             WHERE battlesnake_id = ANY($1)
               AND (user_id = $2 OR visibility = 'public')
               AND deleted_at IS NULL
+              AND retired_at IS NULL
             ORDER BY name ASC
             "#,
             &ids,
@@ -642,14 +648,14 @@ mod tests {
         pool: PgPool,
     ) -> cja::Result<()> {
         let owner: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (91281, 'flow-owner', 'token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (91281, 'flow-owner') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
         let other: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (91282, 'flow-other', 'token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (91282, 'flow-other') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -770,8 +776,8 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn create_for_challenge_preselects_the_snake(pool: PgPool) -> cja::Result<()> {
         let user = sqlx::query!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (7301, 'challenge-user', 'test-token')
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (7301, 'challenge-user')
              RETURNING user_id"
         )
         .fetch_one(&pool)
@@ -810,8 +816,8 @@ mod tests {
 
     async fn persisted_fixture(pool: &PgPool) -> cja::Result<(Uuid, Uuid, Uuid)> {
         let user: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (991282, 'mutation-owner', 'token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (991282, 'mutation-owner') RETURNING user_id",
         )
         .fetch_one(pool)
         .await?;

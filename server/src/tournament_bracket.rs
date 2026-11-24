@@ -263,9 +263,11 @@ pub async fn persist_bracket(
 
 /// Mark a match completed with the given winner.
 ///
-/// The winner must be one of the match's participants. Idempotent: completing
-/// a match that is already completed with the same winner is a no-op (job
-/// retries must be safe); completing with a different winner is an error.
+/// The winner must be one of the match's participants. Only a live match
+/// (`scheduled`/`in_progress`) can be completed: completing a canceled match
+/// is refused. Idempotent: completing a match that is already completed with
+/// the same winner is a no-op (job retries must be safe); completing with a
+/// different winner is an error.
 pub async fn complete_match_with_winner(
     tx: &mut Transaction<'_, Postgres>,
     match_id: Uuid,
@@ -293,7 +295,7 @@ pub async fn complete_match_with_winner(
 
     let updated = sqlx::query!(
         "UPDATE tournament_matches SET status = $2, winner_id = $3
-         WHERE match_id = $1 AND status <> $2",
+         WHERE match_id = $1 AND status IN ('scheduled', 'in_progress')",
         match_id,
         MatchStatus::Completed.as_str(),
         winner_battlesnake_id,
@@ -306,25 +308,36 @@ pub async fn complete_match_with_winner(
         return Ok(());
     }
 
-    // 0 rows: the match is already completed (it must exist — it has
-    // participants). Retrying with the same winner is fine; a different
-    // winner means two results were recorded for one match.
-    let existing_winner = sqlx::query_scalar!(
-        "SELECT winner_id FROM tournament_matches WHERE match_id = $1",
+    // 0 rows: the match is no longer live (it must exist — it has
+    // participants). Retrying a completed match with the same winner is
+    // fine; a canceled match refuses completion; a different winner means
+    // two results were recorded for one match.
+    let existing = sqlx::query!(
+        r#"SELECT status as "status: MatchStatus", winner_id FROM tournament_matches WHERE match_id = $1"#,
         match_id,
     )
-    .fetch_one(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await
-    .wrap_err("Failed to fetch completed match")?;
+    .wrap_err("Failed to fetch match after completion refused")?;
 
-    if existing_winner == Some(winner_battlesnake_id) {
-        Ok(())
-    } else {
-        Err(color_eyre::eyre::eyre!(
-            "Match {match_id} is already completed with winner {existing_winner:?}; \
-             refusing to overwrite with {winner_battlesnake_id}"
-        ))
+    let Some(existing) = existing else {
+        return Err(color_eyre::eyre::eyre!("Match {match_id} not found"));
+    };
+    if existing.status == MatchStatus::Canceled {
+        return Err(color_eyre::eyre::eyre!(
+            "Match {match_id} is canceled; refusing to complete"
+        ));
     }
+    if existing.status == MatchStatus::Completed
+        && existing.winner_id == Some(winner_battlesnake_id)
+    {
+        return Ok(());
+    }
+    Err(color_eyre::eyre::eyre!(
+        "Match {match_id} is already completed with winner {:?}; \
+         refusing to overwrite with {winner_battlesnake_id}",
+        existing.winner_id
+    ))
 }
 
 /// Fill the participant slot in `match_id` that is fed by `source_match_id`.
@@ -611,8 +624,8 @@ mod tests {
     /// indexed by seed (`snakes[0]` is seed 1).
     async fn fixture_persisted_bracket(pool: &PgPool, n: usize) -> cja::Result<(Uuid, Vec<Uuid>)> {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, $3) RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(424_242_i64)
         .bind("test-user")
@@ -815,6 +828,34 @@ mod tests {
         let final_participants = get_participants_for_match(&pool, final_match.match_id).await?;
         assert_eq!(snake_in_slot(&final_participants, 1), Some(snakes[0]));
         assert_eq!(snake_in_slot(&final_participants, 2), Some(snakes[1]));
+
+        Ok(())
+    }
+
+    /// DEV-2180: completing a canceled match must be refused, not silently
+    /// flipped to completed.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn completing_a_canceled_match_is_refused(pool: PgPool) -> cja::Result<()> {
+        let (tournament_id, snakes) = fixture_persisted_bracket(&pool, 2).await?;
+        let matches = get_matches_for_tournament(&pool, tournament_id).await?;
+        let final_match = match_at(&matches, 1, 0);
+
+        sqlx::query("UPDATE tournament_matches SET status = 'canceled' WHERE match_id = $1")
+            .bind(final_match.match_id)
+            .execute(&pool)
+            .await?;
+
+        let mut tx = pool.begin().await?;
+        let err = complete_match_with_winner(&mut tx, final_match.match_id, snakes[0])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("canceled"), "got: {err}");
+        tx.rollback().await?;
+
+        let matches = get_matches_for_tournament(&pool, tournament_id).await?;
+        let reloaded = match_at(&matches, 1, 0);
+        assert_eq!(reloaded.status, MatchStatus::Canceled);
+        assert_eq!(reloaded.winner_id, None);
 
         Ok(())
     }

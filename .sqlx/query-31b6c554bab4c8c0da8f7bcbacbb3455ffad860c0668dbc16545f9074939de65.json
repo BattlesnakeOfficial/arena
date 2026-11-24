@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT leaderboard_id FROM leaderboard_seasons\n         WHERE starts_at <= clock_timestamp()\n           AND (ends_at IS NULL OR clock_timestamp() < ends_at)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "31b6c554bab4c8c0da8f7bcbacbb3455ffad860c0668dbc16545f9074939de65"
+}

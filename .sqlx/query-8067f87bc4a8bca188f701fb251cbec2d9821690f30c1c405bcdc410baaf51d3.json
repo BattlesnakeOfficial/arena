@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tournament_matches SET status = $2\n         WHERE tournament_id = $1 AND status IN ('scheduled', 'in_progress')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8067f87bc4a8bca188f701fb251cbec2d9821690f30c1c405bcdc410baaf51d3"
+}

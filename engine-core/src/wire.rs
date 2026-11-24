@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::EngineGame;
+use crate::{EngineGame, GameMode};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Position {
@@ -152,20 +152,20 @@ impl From<&rules::Point> for Position {
     }
 }
 
-/// The public `(ruleset name, map)` pair for an internal ruleset name.
+/// The public `(ruleset name, map)` pair for a game mode.
 ///
-/// Internal `GameMeta::ruleset_name` drives engine dispatch; everything
-/// public (snake payloads, the engine-compatible game API) matches
-/// play.battlesnake.com exactly (play `ui/maps.py` + `leaderboards_setup.py`).
-/// Royale and Snail Mode were *maps* on the standard ruleset, and
-/// single-snake games were plain standard games, so only Constrictor has its
-/// own ruleset name.
-pub fn wire_ruleset_and_map(internal_ruleset: &str) -> (&'static str, &'static str) {
-    match internal_ruleset {
-        "royale" => ("standard", "royale"),
-        "snail_mode" => ("standard", "snail_mode"),
-        "constrictor" => ("constrictor", "empty"),
-        _ => ("standard", "standard"),
+/// The engine dispatches on `GameMeta::mode`; everything public (snake
+/// payloads, the engine-compatible game API) matches play.battlesnake.com
+/// exactly (play `ui/maps.py` + `leaderboards_setup.py`). Royale and Snail
+/// Mode were *maps* on the standard ruleset, and single-snake games were
+/// plain standard games, so only Constrictor has its own ruleset name.
+pub fn wire_ruleset_and_map(mode: GameMode) -> (&'static str, &'static str) {
+    match mode {
+        GameMode::Standard => ("standard", "standard"),
+        GameMode::Royale => ("standard", "royale"),
+        GameMode::SnailMode => ("standard", "snail_mode"),
+        GameMode::Constrictor => ("constrictor", "empty"),
+        GameMode::Solo => ("standard", "standard"),
     }
 }
 
@@ -291,7 +291,7 @@ impl Game {
 
         let settings = &engine_game.meta.settings;
 
-        let (wire_ruleset_name, wire_map) = wire_ruleset_and_map(&engine_game.meta.ruleset_name);
+        let (wire_ruleset_name, wire_map) = wire_ruleset_and_map(engine_game.meta.mode);
 
         Game {
             game: NestedGame {
@@ -388,7 +388,8 @@ mod tests {
             },
             meta: crate::GameMeta {
                 game_id: "g1".to_string(),
-                ruleset_name: "standard".to_string(),
+                mode: GameMode::Standard,
+                game_over_rule: GameMode::Standard.default_game_over_rule(),
                 timeout: 500,
                 settings: StandardSettings {
                     food_spawn_chance: 15,
@@ -538,7 +539,7 @@ mod tests {
     #[test]
     fn test_royale_game_serializes_real_royale_settings() {
         let mut engine_game = create_test_engine_game();
-        engine_game.meta.ruleset_name = "royale".to_string();
+        engine_game.meta.mode = GameMode::Royale;
         engine_game.meta.settings.hazard_damage_per_turn = 14;
         engine_game.meta.royale = Some(rules::RoyaleSettings {
             shrink_every_n_turns: 25,
@@ -567,7 +568,7 @@ mod tests {
     #[test]
     fn test_constrictor_game_serializes_constrictor_ruleset() {
         let mut engine_game = create_test_engine_game();
-        engine_game.meta.ruleset_name = "constrictor".to_string();
+        engine_game.meta.mode = GameMode::Constrictor;
         engine_game.meta.settings = StandardSettings {
             food_spawn_chance: 0,
             minimum_food: 0,
@@ -605,7 +606,7 @@ mod tests {
     #[test]
     fn test_snail_mode_wire_sends_standard_ruleset_and_snail_map() {
         let mut engine_game = create_test_engine_game();
-        engine_game.meta.ruleset_name = "snail_mode".to_string();
+        engine_game.meta.mode = GameMode::SnailMode;
         engine_game.meta.settings.hazard_damage_per_turn = 14;
 
         let contexts = HashMap::new();
@@ -624,15 +625,15 @@ mod tests {
     /// sent, so `game.map` is never empty.
     #[test]
     fn test_modes_send_play_ruleset_and_map() {
-        for (internal, ruleset, map) in [
-            ("standard", "standard", "standard"),
-            ("royale", "standard", "royale"),
-            ("snail_mode", "standard", "snail_mode"),
-            ("constrictor", "constrictor", "empty"),
-            ("solo", "standard", "standard"),
+        for (mode, ruleset, map) in [
+            (GameMode::Standard, "standard", "standard"),
+            (GameMode::Royale, "standard", "royale"),
+            (GameMode::SnailMode, "standard", "snail_mode"),
+            (GameMode::Constrictor, "constrictor", "empty"),
+            (GameMode::Solo, "standard", "standard"),
         ] {
             let mut engine_game = create_test_engine_game();
-            engine_game.meta.ruleset_name = internal.to_string();
+            engine_game.meta.mode = mode;
 
             let contexts = HashMap::new();
             let customizations = HashMap::new();
@@ -641,9 +642,9 @@ mod tests {
 
             assert_eq!(
                 json["game"]["ruleset"]["name"], ruleset,
-                "ruleset for {internal}"
+                "ruleset for {mode:?}"
             );
-            assert_eq!(json["game"]["map"], map, "map for {internal}");
+            assert_eq!(json["game"]["map"], map, "map for {mode:?}");
         }
     }
 
@@ -805,7 +806,7 @@ mod tests {
     fn test_request_schema_matches_official_client_models() {
         let mut engine_game = engine_game_with_wall_death();
         engine_game.board.hazards = vec![Point::new(0, 0)];
-        engine_game.meta.ruleset_name = "royale".to_string();
+        engine_game.meta.mode = GameMode::Royale;
         engine_game.meta.royale = Some(rules::RoyaleSettings {
             shrink_every_n_turns: 25,
             seed: 1,
@@ -886,7 +887,7 @@ mod tests {
     #[test]
     fn test_solo_game_serializes_as_standard() {
         let mut engine_game = create_test_engine_game();
-        engine_game.meta.ruleset_name = "solo".to_string();
+        engine_game.meta.mode = GameMode::Solo;
 
         let contexts = HashMap::new();
         let customizations = HashMap::new();
@@ -909,7 +910,7 @@ mod tests {
     #[test]
     fn test_off_board_hazard_bookkeeping_never_reaches_snakes() {
         let mut engine_game = create_test_engine_game();
-        engine_game.meta.ruleset_name = "snail_mode".to_string();
+        engine_game.meta.mode = GameMode::SnailMode;
         engine_game.board.hazards = vec![
             rules::Point::new(2, 3),
             rules::Point::new(2, 3),

@@ -152,9 +152,9 @@ pub async fn list_for_admin(pool: &PgPool) -> cja::Result<Vec<AdminLeaderboardLi
         r#"SELECT l.leaderboard_id, l.name, l.game_type, l.board_size, l.match_size,
                   l.visibility as "visibility: Visibility",
                   l.invite_code, l.disabled_at, l.created_at,
-                  (SELECT COUNT(*) FROM leaderboard_entries le
-                    WHERE le.leaderboard_id = l.leaderboard_id
-                      AND le.disabled_at IS NULL) AS "active_entries!"
+                  (SELECT COUNT(*) FROM leaderboard_registrations r
+                    WHERE r.leaderboard_id = l.leaderboard_id
+                      AND r.disabled_at IS NULL) AS "active_entries!"
            FROM leaderboards l
            ORDER BY l.visibility = 'private', l.created_at ASC, l.name ASC"#
     )

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO dropped_fields_repair_queue (engine_game_id, status, reason)\n                VALUES ($1, $2, CASE WHEN $2 = 'failed' THEN 'boom' ELSE NULL END)\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7e811b78307a24453ddc24930f4c062ff40383feb96a9c6568e977cb48f43a43"
+}

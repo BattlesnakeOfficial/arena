@@ -31,6 +31,7 @@ use crate::{
         },
         global_ranking::get_global_player_score,
         leaderboard::{self, LeaderboardSort},
+        leaderboard_season,
         tournament::{self, TournamentStatus},
         turn::{get_latest_frame, get_turn_frames_page},
         user::{User, get_user_by_id},
@@ -234,7 +235,7 @@ async fn load_game_card(
     // DEV-1981: a pruned terminal native game has no `turns` rows, so its
     // card's frame comes from the archive. Terminal-gated: a live game's
     // empty frame is just a game that hasn't produced turns yet.
-    if frame.is_none() && matches!(game.status, GameStatus::Finished | GameStatus::Failed) {
+    if frame.is_none() && game.status.is_terminal() {
         frame = archived_card_frame(state, game_id, spoilers).await?;
     }
     // A frame that doesn't parse (an old import) just means an empty board.
@@ -462,15 +463,17 @@ async fn load_snake_card(
     let entries = leaderboard::get_entries_for_battlesnake(&state.db, battlesnake_id, None)
         .await
         .wrap_err("Failed to get snake leaderboard entries for social card")?;
+    // A registration without an active-season entry (a gap) has no rank.
     for entry in entries.into_iter().filter(|e| e.disabled_at.is_none()) {
-        let rank = leaderboard::get_rank_for_entry(
-            &state.db,
-            entry.leaderboard_id,
-            entry.display_score,
-            entry.games_played,
-        )
-        .await
-        .wrap_err("Failed to rank snake for social card")?;
+        let (Some(season_id), Some(display_score), Some(games_played)) =
+            (entry.season_id, entry.display_score, entry.games_played)
+        else {
+            continue;
+        };
+        let rank =
+            leaderboard::get_rank_for_entry(&state.db, season_id, display_score, games_played)
+                .await
+                .wrap_err("Failed to rank snake for social card")?;
         if let Some(rank) = rank
             && best.as_ref().is_none_or(|(b, _)| rank < *b)
         {
@@ -542,7 +545,7 @@ async fn load_entry_card(
         .wrap_err("Failed to get entry owner for social card")?;
     let rank = leaderboard::get_rank_for_entry(
         &state.db,
-        leaderboard_id,
+        entry.season_id,
         entry.display_score,
         entry.games_played,
     )
@@ -702,21 +705,46 @@ async fn load_leaderboard_card(
     else {
         return Ok(None);
     };
-    let ranked = leaderboard::count_ranked_entries(&state.db, leaderboard_id)
+    // The page's default season; zeros and an empty ladder when only
+    // future seasons exist.
+    let season_id = match leaderboard_season::select_season(&state.db, leaderboard_id, None)
         .await
-        .wrap_err("Failed to count ranked entries for social card")?;
-    let status = leaderboard::get_leaderboard_status(&state.db, leaderboard_id)
+        .wrap_err("Failed to select season for social card")?
+    {
+        leaderboard_season::SeasonLookup::Found(selection) => {
+            selection.selected.map(|info| info.season.season_id)
+        }
+        leaderboard_season::SeasonLookup::Foreign => None,
+    };
+    let (ranked, status, top) = if let Some(season_id) = season_id {
+        let ranked = leaderboard::count_ranked_entries(&state.db, leaderboard_id, season_id)
+            .await
+            .wrap_err("Failed to count ranked entries for social card")?;
+        let status = leaderboard::get_leaderboard_status(&state.db, leaderboard_id, season_id)
+            .await
+            .wrap_err("Failed to get leaderboard status for social card")?;
+        let top = leaderboard::get_ranked_entries_paginated(
+            &state.db,
+            leaderboard_id,
+            season_id,
+            0,
+            LADDER_ROWS,
+            LeaderboardSort::Rating,
+        )
         .await
-        .wrap_err("Failed to get leaderboard status for social card")?;
-    let top = leaderboard::get_ranked_entries_paginated(
-        &state.db,
-        leaderboard_id,
-        0,
-        LADDER_ROWS,
-        LeaderboardSort::Rating,
-    )
-    .await
-    .wrap_err("Failed to get top entries for social card")?;
+        .wrap_err("Failed to get top entries for social card")?;
+        (ranked, status, top)
+    } else {
+        (
+            0,
+            leaderboard::LeaderboardStatus {
+                last_game_created_at: None,
+                games_in_progress: 0,
+                total_games: 0,
+            },
+            vec![],
+        )
+    };
     let ids: Vec<Uuid> = top.iter().map(|e| e.battlesnake_id).collect();
     let looks = battlesnake::get_cosmetics_by_ids(&state.db, &ids)
         .await
@@ -737,15 +765,23 @@ async fn load_leaderboard_card(
                 rank,
                 rating: rating(entry.display_score),
                 snake: RosterSnake {
-                    color: snake_color(&entry.snake_color),
+                    // "" ⇒ snake_fallback gray for tombstones.
+                    color: snake_color(entry.snake_color.as_deref().unwrap_or("")),
+                    // Unchanged: the cosmetics lookup already skips deleted
+                    // snakes, so a tombstone head is the default shape.
                     head: shape(
                         AssetKind::Head,
                         looks
                             .get(&entry.battlesnake_id)
                             .map_or("", |l| l.head.as_str()),
                     ),
-                    name: entry.snake_name,
-                    owner: entry.owner_name,
+                    name: if entry.deleted {
+                        "Deleted snake".to_string()
+                    } else {
+                        entry.snake_name.clone().unwrap_or_default()
+                    },
+                    // "" for tombstones: the card skips the owner line.
+                    owner: entry.owner_name.clone().unwrap_or_default(),
                     placement: None,
                     draw: false,
                 },
@@ -992,9 +1028,9 @@ mod tests {
     /// turn 3; "Late Comer" won. Frames for turns 0-4.
     async fn fixture_duel(pool: &PgPool, status: &str) -> (Uuid, [Uuid; 2]) {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
+            "INSERT INTO users (external_github_id, github_login)
              VALUES ((SELECT COALESCE(MAX(external_github_id), 777000) + 1 FROM users),
-                     'og-owner-' || gen_random_uuid(), '')
+                     'og-owner-' || gen_random_uuid())
              RETURNING user_id",
         )
         .fetch_one(pool)
@@ -1074,8 +1110,8 @@ mod tests {
 
     async fn fixture_world(pool: &PgPool) -> World {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token, display_name)
-             VALUES (888001, 'og-player', '', 'OG Player') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login, display_name)
+             VALUES (888001, 'og-player', 'OG Player') RETURNING user_id",
         )
         .fetch_one(pool)
         .await
@@ -1096,14 +1132,15 @@ mod tests {
         .await
         .unwrap();
         let entry_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, games_played, display_score)
-             VALUES ($1, $2, 12, 33.3) RETURNING leaderboard_entry_id",
+            "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id, games_played, display_score)
+             VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2, 12, 33.3) RETURNING leaderboard_entry_id",
         )
         .bind(leaderboard_id)
         .bind(snake_id)
         .fetch_one(pool)
         .await
         .unwrap();
+        crate::routes::test_support::register_snake_entries(pool, snake_id).await;
         let tournament_id: Uuid = sqlx::query_scalar(
             "INSERT INTO tournaments (name, user_id, status) VALUES ('OG Cup', $1, 'completed')
              RETURNING tournament_id",
@@ -1239,7 +1276,8 @@ mod tests {
         .unwrap();
         let entry = leaderboard::get_or_create_entry(&pool, private, w.snake_id)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("live snake joins");
         sqlx::query!(
             "UPDATE leaderboard_entries SET games_played = 50, display_score = 99
              WHERE leaderboard_entry_id = $1",
@@ -1299,6 +1337,49 @@ mod tests {
         );
         let reply = get(&state, &tournament_card_path(w.tournament_id)).await;
         assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    }
+
+    /// Ended-season ladder cards tombstone deleted snakes: neutral name, no
+    /// owner, the gray fallback colour and the default head shape — and the
+    /// skip-empty-owner layout still renders.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn leaderboard_card_tombstones_deleted_snakes(pool: PgPool) {
+        let state = AppState::test_from_pool(pool.clone());
+        let w = fixture_world(&pool).await;
+        sqlx::query(
+            "UPDATE leaderboard_seasons
+             SET starts_at = clock_timestamp() - interval '30 days',
+                 ends_at = clock_timestamp() - interval '1 day'
+             WHERE leaderboard_id = $1",
+        )
+        .bind(w.leaderboard_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::models::battlesnake::delete_battlesnake(&pool, w.snake_id, w.user_id)
+                .await
+                .unwrap(),
+            crate::models::battlesnake::DeleteBattlesnakeOutcome::Deleted
+        );
+
+        let card = load_leaderboard_card(&state, w.leaderboard_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let row = &card.rows[0];
+        assert_eq!(row.snake.name, "Deleted snake");
+        assert!(row.snake.owner.is_empty());
+        assert_eq!(row.snake.color, palette::snake_fallback());
+        // The cosmetics lookup skips deleted snakes, so the head falls back
+        // to the default catalog shape — the same 'static entry
+        // `shape(AssetKind::Head, "")` returns, never `None`.
+        assert!(std::ptr::eq(
+            row.snake.head.unwrap(),
+            shape(AssetKind::Head, "").unwrap()
+        ));
+        // Guards the skip-empty-owner centering change.
+        cards::leaderboard_card(&card).unwrap();
     }
 
     #[sqlx::test(migrations = "../migrations")]
@@ -1579,8 +1660,8 @@ mod tests {
         .await
         .unwrap();
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (888901, 'og-prune', '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (888901, 'og-prune') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await
@@ -1673,7 +1754,7 @@ mod tests {
 
     async fn share_user(pool: &PgPool, github_id: i64) -> Uuid {
         sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES ($1, $2, '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login) VALUES ($1, $2) RETURNING user_id",
         )
         .bind(github_id)
         .bind(format!("og-earn-{github_id}"))

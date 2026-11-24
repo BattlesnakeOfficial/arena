@@ -35,6 +35,7 @@ async fn setup(db: &PgPool) -> Setup {
         url: "https://coverage.example".to_string(),
         visibility: Visibility::Public,
         engine_region: Default::default(),
+        allow_tournament_import: true,
     };
     let Battlesnake {
         battlesnake_id: snake,

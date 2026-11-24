@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tournaments SET current_round = $2\n         WHERE tournament_id = $1 AND current_round = $3 AND status = 'in_progress'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a75e84a198a54e52ec10263a79bc9eb963e417c8688f438b6701a594f9634518"
+}

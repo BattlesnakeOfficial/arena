@@ -14,6 +14,8 @@ use crate::{
     models::{
         battlesnake,
         leaderboard::{self, MIN_GAMES_FOR_RANKING},
+        leaderboard_registration,
+        leaderboard_season::{self, SeasonLookup},
         private_leaderboard,
     },
     routes::auth::ApiUser,
@@ -35,11 +37,17 @@ pub struct LeaderboardResponse {
 pub struct RankingEntry {
     pub rank: usize,
     pub battlesnake_id: Uuid,
-    pub snake_name: String,
+    /// `null` when the snake is soft-deleted (tombstone on frozen standings).
+    pub snake_name: Option<String>,
     /// Owner's GitHub login (stable identifier, the `/users/{login}` key).
-    pub owner: String,
+    /// `null` when the snake is soft-deleted.
+    pub owner: Option<String>,
     /// Owner's public name: display name when set, else the GitHub login.
-    pub owner_name: String,
+    /// `null` when the snake is soft-deleted.
+    pub owner_name: Option<String>,
+    /// The snake is soft-deleted: identity fields above are null, but the
+    /// row and its rank stay (ended-season standings only).
+    pub deleted: bool,
     pub display_score: f64,
     pub games_played: i32,
     pub first_place_finishes: i32,
@@ -69,11 +77,16 @@ pub struct OptInRequest {
 pub struct RankingsQuery {
     #[serde(default)]
     pub sort: leaderboard::LeaderboardSort,
+    /// `?season=<season_id>`; absent = the same default season as the page.
+    #[serde(default)]
+    pub season: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct EntryResponse {
-    pub leaderboard_entry_id: Uuid,
+    /// The active-season entry; `None` when the league is between seasons
+    /// (the snake is registered and plays once the next season starts).
+    pub leaderboard_entry_id: Option<Uuid>,
     pub battlesnake_id: Uuid,
     pub display_score: f64,
     pub games_played: i32,
@@ -95,6 +108,15 @@ pub async fn list_leaderboards(
                 "Internal server error".to_string(),
             )
         })?;
+    let active_season_ids = leaderboard_season::leaderboards_with_active_season(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to fetch active seasons: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            )
+        })?;
 
     let response: Vec<LeaderboardResponse> = leaderboards
         .into_iter()
@@ -104,7 +126,8 @@ pub async fn list_leaderboards(
             game_type: lb.game_type,
             board_size: lb.board_size,
             match_size: lb.match_size,
-            active: lb.disabled_at.is_none(),
+            // Live = not admin-paused and inside a season.
+            active: lb.disabled_at.is_none() && active_season_ids.contains(&lb.leaderboard_id),
             created_at: lb.created_at,
         })
         .collect();
@@ -129,25 +152,46 @@ pub async fn get_rankings(
         })?
         .ok_or((StatusCode::NOT_FOUND, "Leaderboard not found".to_string()))?;
 
-    let ranked = leaderboard::get_ranked_entries(&state.db, leaderboard_id, query.sort)
+    let lookup = leaderboard_season::select_season(&state.db, leaderboard_id, query.season)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to fetch ranked entries: {}", e);
+            tracing::error!("Failed to select leaderboard season: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error".to_string(),
             )
         })?;
+    let SeasonLookup::Found(selection) = lookup else {
+        return Err((StatusCode::NOT_FOUND, "Season not found".to_string()));
+    };
 
-    let placement = leaderboard::get_placement_entries(&state.db, leaderboard_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to fetch placement entries: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal server error".to_string(),
-            )
-        })?;
+    // Only future seasons: nothing to rank yet.
+    let (ranked, placement) = if let Some(info) = selection.selected {
+        let season_id = info.season.season_id;
+        let ranked =
+            leaderboard::get_ranked_entries(&state.db, leaderboard_id, season_id, query.sort)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to fetch ranked entries: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal server error".to_string(),
+                    )
+                })?;
+
+        let placement = leaderboard::get_placement_entries(&state.db, leaderboard_id, season_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to fetch placement entries: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string(),
+                )
+            })?;
+        (ranked, placement)
+    } else {
+        (vec![], vec![])
+    };
 
     // Collect entry IDs from both ranked and placement entries for scoring lookups
     let entry_ids: Vec<Uuid> = ranked
@@ -199,6 +243,7 @@ pub async fn get_rankings(
                     snake_name: e.snake_name,
                     owner: e.owner_login,
                     owner_name: e.owner_name,
+                    deleted: e.deleted,
                     display_score: e.display_score,
                     games_played: e.games_played,
                     first_place_finishes: e.first_place_finishes,
@@ -271,6 +316,13 @@ pub async fn create_entry(
         ));
     }
 
+    if snake.retired_at.is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            "Battlesnake is retired; unretire it before joining.".to_string(),
+        ));
+    }
+
     let allowed = private_leaderboard::join_allowed(
         &state.db,
         &lb,
@@ -292,39 +344,58 @@ pub async fn create_entry(
         ));
     }
 
-    let entry = leaderboard::get_or_create_entry(&state.db, leaderboard_id, request.battlesnake_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to create entry: {}", e);
+    let internal = |context: &'static str| {
+        move |e: cja::color_eyre::Report| {
+            tracing::error!("{context}: {e:#}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error".to_string(),
             )
-        })?;
-
-    // Initialize scoring algorithm entries
-    for algo in state.scoring.algorithms() {
-        algo.initialize_entry(&state.db, entry.leaderboard_entry_id)
+        }
+    };
+    let registration = leaderboard_registration::get_or_create_registration(
+        &state.db,
+        leaderboard_id,
+        request.battlesnake_id,
+    )
+    .await
+    .map_err(internal("Failed to create registration"))?;
+    let Some(registration) = registration else {
+        let retired = battlesnake::get_battlesnake_by_id(&state.db, request.battlesnake_id)
             .await
-            .map_err(|e| {
-                tracing::error!("Failed to initialize scoring: {}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Internal server error".to_string(),
-                )
-            })?;
-    }
+            .map_err(internal("Failed to recheck battlesnake"))?
+            .is_some_and(|snake| snake.user_id == auth.user_id && snake.retired_at.is_some());
+        return Err(if retired {
+            (
+                StatusCode::CONFLICT,
+                "Battlesnake is retired; unretire it before joining.".to_string(),
+            )
+        } else {
+            (StatusCode::NOT_FOUND, "Battlesnake not found".to_string())
+        });
+    };
+
+    // The active season's entry, created lazily (with its scoring rows).
+    // `None` during a gap between seasons: the join still succeeded.
+    let entry = leaderboard::ensure_snake_season_entry(
+        &state.db,
+        &state.scoring,
+        leaderboard_id,
+        request.battlesnake_id,
+    )
+    .await
+    .map_err(internal("Failed to create season entry"))?;
 
     Ok((
         StatusCode::CREATED,
         Json(EntryResponse {
-            leaderboard_entry_id: entry.leaderboard_entry_id,
-            battlesnake_id: entry.battlesnake_id,
-            display_score: entry.display_score,
-            games_played: entry.games_played,
-            first_place_finishes: entry.first_place_finishes,
-            non_first_finishes: entry.non_first_finishes,
-            active: entry.disabled_at.is_none(),
+            leaderboard_entry_id: entry.as_ref().map(|e| e.leaderboard_entry_id),
+            battlesnake_id: registration.battlesnake_id,
+            display_score: entry.as_ref().map_or(0.0, |e| e.display_score),
+            games_played: entry.as_ref().map_or(0, |e| e.games_played),
+            first_place_finishes: entry.as_ref().map_or(0, |e| e.first_place_finishes),
+            non_first_finishes: entry.as_ref().map_or(0, |e| e.non_first_finishes),
+            active: registration.disabled_at.is_none(),
         }),
     ))
 }
@@ -357,10 +428,10 @@ pub async fn delete_entry(
         ));
     }
 
-    let entry = leaderboard::get_entry(&state.db, leaderboard_id, battlesnake_id)
+    leaderboard_registration::get_registration(&state.db, leaderboard_id, battlesnake_id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to fetch entry: {}", e);
+            tracing::error!("Failed to fetch registration: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error".to_string(),
@@ -371,14 +442,15 @@ pub async fn delete_entry(
             "Snake is not in this leaderboard".to_string(),
         ))?;
 
-    leaderboard::set_disabled(
+    leaderboard_registration::set_registration_disabled(
         &state.db,
-        entry.leaderboard_entry_id,
+        leaderboard_id,
+        battlesnake_id,
         Some(chrono::Utc::now()),
     )
     .await
     .map_err(|e| {
-        tracing::error!("Failed to disable entry: {}", e);
+        tracing::error!("Failed to pause registration: {}", e);
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Internal server error".to_string(),
@@ -407,6 +479,7 @@ mod scoped_token_tests {
                 url: format!("https://{name}.example"),
                 visibility: Visibility::Public,
                 engine_region: Default::default(),
+                allow_tournament_import: true,
             },
         )
         .await
@@ -499,5 +572,58 @@ mod scoped_token_tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn retired_snake_join_returns_conflict_and_unretired_join_succeeds(db: PgPool) {
+        use crate::models::battlesnake;
+        let state = AppState::test_from_pool(db.clone());
+        let app = api_app(&state);
+        let user = create_user(&db, 262030, false).await;
+        let snake = make_snake(&db, user, "api-retired").await;
+        let leaderboard_id: Uuid = sqlx::query_scalar(
+            "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let token = create_api_token(
+            &db,
+            user,
+            "retirement",
+            &[Permission::SnakeCompete],
+            SnakeAccess::All,
+            &[],
+        )
+        .await
+        .unwrap();
+        battlesnake::retire_battlesnake(&db, snake, user)
+            .await
+            .unwrap();
+        let path = format!("/api/leaderboards/{leaderboard_id}/entries");
+        let body = Some(serde_json::json!({ "battlesnake_id": snake }));
+        let (status, message) =
+            send_api(&app, "POST", &path, Some(&token.secret), body.clone()).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            message,
+            "Battlesnake is retired; unretire it before joining."
+        );
+        let missing = Uuid::new_v4();
+        let (status, message) = send_api(
+            &app,
+            "POST",
+            &path,
+            Some(&token.secret),
+            Some(serde_json::json!({ "battlesnake_id": missing })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(message, "Battlesnake not found");
+        battlesnake::unretire_battlesnake(&db, snake, user)
+            .await
+            .unwrap();
+        let (status, _) = send_api(&app, "POST", &path, Some(&token.secret), body).await;
+        assert_eq!(status, StatusCode::CREATED);
     }
 }

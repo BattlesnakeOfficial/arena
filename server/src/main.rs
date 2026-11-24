@@ -23,6 +23,7 @@ mod cron;
 mod customizations;
 mod discord;
 mod django_password;
+mod dropped_fields_repair;
 mod email;
 mod engine;
 mod engine_models;
@@ -35,6 +36,10 @@ mod highlights;
 mod jobs;
 mod leaderboard_matchmaker;
 mod leaderboard_ratings;
+#[cfg(test)]
+mod leaderboard_seasons_p2_tests;
+#[cfg(test)]
+mod leaderboard_seasons_p4_tests;
 mod models;
 mod moderation;
 mod native_backup;
@@ -95,6 +100,7 @@ mod components {
     pub mod live_refresh;
     pub mod page;
     pub mod page_factory;
+    pub mod snake_avatar;
     pub mod snake_board;
     pub mod snake_tags;
 }
@@ -184,34 +190,33 @@ async fn run_application(config: config::AppConfig) -> cja::Result<()> {
 
     // Secrets load BEFORE telemetry init: the Eyes layer reads its token at
     // build time, and the token lives in setec (DEV-1966).
-    let secrets = load_secrets_before_telemetry(&config).await?;
+    let secrets = load_secrets_before_telemetry().await?;
     let eyes_token = secrets::resolve_eyes_token(
         secrets.as_ref().and_then(|(s, _)| s.eyes_token.as_ref()),
         config.eyes.as_ref().and_then(|eyes| eyes.token.clone()),
     );
 
-    let eyes_shutdown_handle = if config.gcp_logging {
-        telemetry::setup_gcp_tracing(
-            &config.rust_log,
+    let mut tracing = TracingConfig::new("arena").process(identity.clone());
+    if config.gcp_logging {
+        tracing = tracing.stdout_layer(telemetry::stdout_layer(
             config.stdout_log.as_deref(),
-            config.eyes.as_ref(),
-            &identity,
-            eyes_token.as_deref(),
-        )?
-    } else {
-        TracingConfig::new("arena")
-            .process(identity.clone())
-            .init()?
-    };
+            std::io::stdout,
+        )?);
+    }
+    if let Some(eyes) = &config.eyes {
+        tracing = tracing.eyes_ids(eyes.org_id, eyes.app_id);
+    }
+    if let Some(token) = &eyes_token {
+        tracing = tracing.eyes_token(token.as_str());
+    }
+    let telemetry_shutdown_handle = tracing.init()?;
     let result = run_instrumented_application(config, identity, secrets, eyes_token).await;
     // Preserve the final error before flushing, including startup failures.
     if let Err(error) = &result {
         tracing::error!(error = %format!("{error:#}"), "Arena process exiting after failure");
     }
-    if let Some(handle) = eyes_shutdown_handle
-        && let Err(error) = handle.shutdown().await
-    {
-        tracing::warn!(%error, "Error shutting down Eyes");
+    if let Err(error) = telemetry_shutdown_handle.shutdown().await {
+        tracing::warn!(%error, "Error shutting down telemetry");
     }
     result
 }
@@ -222,9 +227,8 @@ async fn run_application(config: config::AppConfig) -> cja::Result<()> {
 /// boot window (tailscale-rs/setec internals) go to the no-op global
 /// dispatcher until the real subscriber is installed. Fail-fast unchanged: on
 /// error the full chain goes to stderr and the process exits non-zero.
-async fn load_secrets_before_telemetry(
-    config: &config::AppConfig,
-) -> cja::Result<Option<(secrets::AppSecrets, cja_secret::Refresher)>> {
+async fn load_secrets_before_telemetry()
+-> cja::Result<Option<(secrets::AppSecrets, cja_secret::Refresher)>> {
     use tracing::instrument::WithSubscriber as _;
 
     // `.with_ansi(false)`: the `ansi` feature is a default feature of
@@ -232,7 +236,10 @@ async fn load_secrets_before_telemetry(
     // Logging would ingest the escape codes verbatim as textPayload. The
     // real stdout layer makes the same choice (telemetry.rs).
     let boot_subscriber = tracing_subscriber::fmt::Subscriber::builder()
-        .with_env_filter(tracing_subscriber::EnvFilter::new(&config.rust_log))
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,arena=trace,tower_http=debug,serenity=error".into()),
+        ))
         .with_ansi(false)
         .finish();
 
@@ -249,10 +256,19 @@ async fn load_secrets_before_telemetry(
 }
 
 /// Time tasks get to exit after the job drain ends: job workers release
-/// their locks, the HTTP server closes connections. Together with
-/// `JobConfig::shutdown_drain_secs` this must stay under Cloud Run's fixed
-/// 10 second SIGTERM-to-SIGKILL window, with room left to flush telemetry.
-pub(crate) const SHUTDOWN_EXIT_GRACE: Duration = Duration::from_secs(3);
+/// their locks, the HTTP server closes connections. The bounded steps are
+/// the 4-second job drain (`JobConfig::shutdown_drain_secs`), this 2-second
+/// grace, the 0.5-second Eyes shutdown signal
+/// (`observability::EYES_HEARTBEAT_SHUTDOWN_TIMEOUT`), and up to 3 seconds
+/// of telemetry flush: 4 + 2 + 0.5 + 3 = 9.5 seconds at the defaults.
+/// This is not a process-exit bound. After the supervisor deadline, cja's
+/// `Supervisor::run` (via private `run_until`) calls `self.tasks.shutdown().await` before Eyes
+/// shutdown and telemetry flush; `JoinSet::shutdown` cancels async tasks at
+/// their next yield but can wait on synchronous worker code. After the flush,
+/// dropping the multi-thread runtime waits for in-flight `spawn_blocking`
+/// work. Either wait can extend exit beyond Cloud Run's fixed 10-second
+/// SIGTERM-to-SIGKILL interval.
+pub(crate) const SHUTDOWN_EXIT_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, PartialEq, Eq)]
 enum ProcessTask {
@@ -315,6 +331,20 @@ async fn spawn_application_tasks(
     // Build the registry once; the manifest and worker both use it when
     // this process has CRON enabled.
     let cron_registry = cron::cron_registry(&app_state.config);
+
+    if features.server && features.jobs && features.cron {
+        cja::posthog_manifest::emit_boot_manifest::<jobs::Jobs, AppState>(
+            &app_state,
+            &cja::posthog_manifest::BootManifest::new(
+                "arena",
+                &cron_registry,
+                &cja::jiff::tz::TimeZone::UTC,
+                observability::CRITICAL_JOBS,
+                &[],
+            )
+            .git_sha(env!("VERGEN_GIT_SHA")),
+        )?;
+    }
 
     let manifest = observability::manifest(&cron_registry, identity, features)
         .map_err(|error| eyre!("Invalid Arena observability declarations: {error}"))?;
@@ -402,6 +432,39 @@ async fn spawn_application_tasks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn real_inventory_passes_posthog_boot_manifest_validation(pool: sqlx::PgPool) {
+        let state = AppState::test_from_pool(pool);
+        let registry = cron::cron_registry(&state.config);
+        cja::posthog_manifest::emit_boot_manifest::<jobs::Jobs, AppState>(
+            &state,
+            &cja::posthog_manifest::BootManifest::new(
+                "arena",
+                &registry,
+                &cja::jiff::tz::TimeZone::UTC,
+                observability::CRITICAL_JOBS,
+                &[],
+            )
+            .git_sha(env!("VERGEN_GIT_SHA")),
+        )
+        .expect("arena's real job, cron, and monitor inventory must validate");
+    }
+
+    /// cja's bound on `TelemetryShutdownHandle::shutdown` (its
+    /// `TELEMETRY_SHUTDOWN_BUDGET`, which cja does not export).
+    const CJA_TELEMETRY_FLUSH_BOUND: Duration = Duration::from_secs(3);
+
+    #[test]
+    fn bounded_shutdown_steps_total_9_5_seconds() {
+        // Only the timed steps, in execution order; unbounded supervisor
+        // and runtime-drop waits can extend process exit past this total.
+        let bounded_total = Duration::from_secs(config::DEFAULT_JOB_SHUTDOWN_DRAIN_SECS)
+            + SHUTDOWN_EXIT_GRACE
+            + observability::EYES_HEARTBEAT_SHUTDOWN_TIMEOUT
+            + CJA_TELEMETRY_FLUSH_BOUND;
+        assert_eq!(bounded_total, Duration::from_millis(9500));
+    }
 
     #[test]
     fn process_roles_schedule_only_their_components() {

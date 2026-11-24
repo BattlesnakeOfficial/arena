@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM jobs WHERE context = 'fake backlog'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "f1f7435b9af0ae5c6b8379fa97cc8b80bc01c158afdff37b82e2ba6370820e2f"
+}

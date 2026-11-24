@@ -1100,7 +1100,9 @@ pub async fn show_tournament(
                     .await
                     .wrap_err("Failed to fetch viewer's battlesnakes")?
                     .into_iter()
-                    .filter(|s| !registered_ids.contains(&s.battlesnake_id))
+                    .filter(|s| {
+                        s.retired_at.is_none() && !registered_ids.contains(&s.battlesnake_id)
+                    })
                     .collect()
             } else {
                 vec![]
@@ -1381,7 +1383,7 @@ pub async fn show_tournament(
                             div class="block" {
                                 h3 { "Import from Leaderboard" }
                                 p class="railp" {
-                                    "Register the top-ranked snakes from a leaderboard, seeded by rank."
+                                    "Register the top-ranked snakes from a leaderboard, seeded by rank. Private snakes and snakes whose owners opted out of imports are skipped."
                                 }
                                 form class="rail-form" action={"/tournaments/"(t.tournament_id)"/import-leaderboard"} method="post" {
                                     select name="leaderboard_id" aria-label="Leaderboard" {
@@ -1777,6 +1779,16 @@ pub async fn register_snake(
         )
         .await;
     };
+    if snake.retired_at.is_some() {
+        return flash_redirect(
+            &state,
+            session.session_id,
+            "This battlesnake is retired — unretire it before registering.".to_string(),
+            session::FLASH_TYPE_ERROR,
+            &detail_url,
+        )
+        .await;
+    }
 
     let registration =
         match register_snake_in_tx(&mut tx, &t, user.user_id, snake.battlesnake_id, &snake.name)
@@ -2055,6 +2067,26 @@ pub async fn update_status(
         .await
         .wrap_err("Failed to update tournament status")?;
 
+    // Cancel stops the machine: every live match of the tournament is
+    // canceled in the same transaction as the status flip, so a finishing
+    // game's completion hook can't resurrect the bracket. Unconditional on
+    // the from-status — cancel from `created`/`registration` has no matches
+    // (the bracket is generated at start), and cancel from `completed` finds
+    // no live matches; both are no-ops.
+    if next_status == TournamentStatus::Canceled {
+        let canceled_matches =
+            tournament::cancel_unfinished_matches_for_tournament(&mut *tx, tournament_id)
+                .await
+                .wrap_err("Failed to cancel unfinished matches")?;
+        if canceled_matches > 0 {
+            tracing::info!(
+                tournament_id = %tournament_id,
+                canceled_matches = canceled_matches,
+                "Canceled in-flight tournament matches"
+            );
+        }
+    }
+
     tx.commit()
         .await
         .wrap_err("Failed to commit status transaction")?;
@@ -2123,7 +2155,10 @@ async fn start_tournament_in_tx(
     )
     .await
     .wrap_err("Failed to set tournament in progress")?;
-    tournament::set_tournament_current_round(&mut **tx, t.tournament_id, 1)
+    // `t` comes from get_tournament_for_update (row locked) and is 0 for
+    // both fresh and reset tournaments; the CAS's `status = 'in_progress'
+    // guard holds because the status flip above ran in this transaction.
+    tournament::set_tournament_current_round(&mut **tx, t.tournament_id, 1, t.current_round)
         .await
         .wrap_err("Failed to set current round")?;
 
@@ -2307,8 +2342,11 @@ pub async fn run_round(
 /// - the game-completion hook (`resolve_finished_match_game`) no-ops for
 ///   games whose `match_games` row was cascaded away,
 /// - stranded `RunMatchJob`s warn and no-op when their match is gone,
-/// - the stuck-match sweeper only re-enqueues matches that still exist in
-///   `in_progress`, and
+/// - the stuck-match sweeper only enqueues work for matches and tournaments
+///   that still exist in an `in_progress` tournament (a reset zeroes
+///   `current_round` and flips the status in the same transaction, so every
+///   sweeper branch is inert after a reset; deleted matches can't be
+///   selected), and
 /// - a stranded `RunTournamentRoundJob` carries the round it was enqueued
 ///   for and no-ops when it no longer matches `current_round`.
 ///
@@ -2362,7 +2400,11 @@ pub async fn reset_tournament(
     tournament::delete_matches_for_tournament(&mut *tx, tournament_id)
         .await
         .wrap_err("Failed to delete tournament matches")?;
-    tournament::set_tournament_current_round(&mut *tx, tournament_id, 0)
+    // ORDER IS LOAD-BEARING: the round reset must run BEFORE the status flip
+    // below — the current_round CAS guard requires `status = 'in_progress'`,
+    // which still holds at this point in the transaction. Reordering would
+    // make reset fail.
+    tournament::set_tournament_current_round(&mut *tx, tournament_id, 0, t.current_round)
         .await
         .wrap_err("Failed to reset current round")?;
     tournament::set_tournament_status(
@@ -2481,13 +2523,46 @@ pub async fn import_leaderboard(
 
     let count = form.count.clamp(1, MAX_IMPORT_COUNT);
 
-    let ranked = leaderboard::get_ranked_entries(
-        &state.db,
-        lb.leaderboard_id,
-        leaderboard::LeaderboardSort::Rating,
-    )
-    .await
-    .wrap_err("Failed to fetch ranked leaderboard entries")?;
+    // The ladder's default season (active, else the last ended — its
+    // frozen standings). Only future seasons: nothing to import, which takes
+    // the "No eligible snakes" path below.
+    let season_id =
+        match crate::models::leaderboard_season::select_season(&state.db, lb.leaderboard_id, None)
+            .await
+            .wrap_err("Failed to select leaderboard season")?
+        {
+            crate::models::leaderboard_season::SeasonLookup::Found(selection) => {
+                selection.selected.map(|info| info.season.season_id)
+            }
+            crate::models::leaderboard_season::SeasonLookup::Foreign => None,
+        };
+    let mut ranked = match season_id {
+        Some(season_id) => leaderboard::get_ranked_entries(
+            &state.db,
+            lb.leaderboard_id,
+            season_id,
+            leaderboard::LeaderboardSort::Rating,
+        )
+        .await
+        .wrap_err("Failed to fetch ranked leaderboard entries")?,
+        None => vec![],
+    };
+    // An ended season's frozen standings include snakes that have since left
+    // the league, been paused, retired or deleted. Import only current live
+    // members: leaving a ladder opts a snake out of its imports, and a dead
+    // snake can't be registered at all.
+    let live_members =
+        crate::models::leaderboard_registration::live_member_snake_ids(&mut tx, lb.leaderboard_id)
+            .await?;
+    ranked.retain(|entry| live_members.contains(&entry.battlesnake_id));
+
+    // The organizer may pull in their own snakes; another user's snake only
+    // if it's public and its owner hasn't opted out of imports.
+    let ranked_ids: Vec<Uuid> = ranked.iter().map(|e| e.battlesnake_id).collect();
+    let eligible = battlesnake::lock_importable_battlesnake_ids(&mut tx, user.user_id, &ranked_ids)
+        .await
+        .wrap_err("Failed to check imported snake eligibility")?;
+    ranked.retain(|entry| eligible.contains(&entry.battlesnake_id));
 
     // Snapshot the registrations inside the locked transaction so duplicate
     // skipping and the per-user/total caps are enforced against reality.
@@ -2796,11 +2871,14 @@ mod tests {
             non_first_finishes: 40,
             mu: 25.0,
             sigma: 8.333,
-            snake_name: "ranked-snake".to_string(),
-            snake_color: "#888888".to_string(),
-            owner_login: "ranked-owner".to_string(),
-            owner_name: "Ranked Owner".to_string(),
-            owner_country: String::new(),
+            snake_name: Some("ranked-snake".to_string()),
+            snake_color: Some("#888888".to_string()),
+            snake_head: Some(String::new()),
+            snake_tail: Some(String::new()),
+            owner_login: Some("ranked-owner".to_string()),
+            owner_name: Some("Ranked Owner".to_string()),
+            owner_country: Some(String::new()),
+            deleted: false,
         }
     }
 
@@ -2945,8 +3023,8 @@ mod tests {
     // offline cache.
     async fn fixture_user(pool: &PgPool, github_id: i64, login: &str) -> cja::Result<Uuid> {
         let user_id = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, $3) RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(github_id)
         .bind(login)

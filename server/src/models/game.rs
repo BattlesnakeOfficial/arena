@@ -137,6 +137,14 @@ impl GameStatus {
             GameStatus::Failed => "failed",
         }
     }
+
+    /// True for the statuses a game never leaves: `Finished` (terminal
+    /// success) and `Failed` (terminal failure — see the variant docs).
+    /// Every terminal-set check routes through here; the DB CHECK
+    /// `games_status_domain` pins the same set in SQL.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, GameStatus::Finished | GameStatus::Failed)
+    }
 }
 
 impl FromStr for GameStatus {
@@ -233,6 +241,10 @@ pub(crate) struct ScheduleGame {
     pub leaderboard_id: Option<Uuid>,
     pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
     pub participants: Vec<Uuid>,
+    /// The game's season is the league's active one. A waiting game whose
+    /// season ended is held: never dispatched or claimed, and reserves no
+    /// snakes. Always false for non-ladder games (unused for running ones).
+    pub season_active: bool,
 }
 
 #[derive(Debug)]
@@ -249,6 +261,8 @@ pub(crate) async fn load_schedule_snapshot(
     let rows = sqlx::query!(
         r#"SELECT g.game_id, g.status, g.created_at, lg.leaderboard_id,
                   lb.disabled_at,
+                  (s.season_id IS NOT NULL AND s.starts_at <= clock_timestamp()
+                   AND (s.ends_at IS NULL OR clock_timestamp() < s.ends_at)) AS "season_active!",
                   ARRAY(SELECT DISTINCT COALESCE(gb.battlesnake_id, le.battlesnake_id)
                         FROM game_battlesnakes gb
                         LEFT JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id
@@ -257,6 +271,7 @@ pub(crate) async fn load_schedule_snapshot(
            FROM games g
            LEFT JOIN leaderboard_games lg ON lg.game_id = g.game_id
            LEFT JOIN leaderboards lb ON lb.leaderboard_id = lg.leaderboard_id
+           LEFT JOIN leaderboard_seasons s ON s.season_id = lg.season_id
            WHERE g.status = 'running' OR (g.status = 'waiting' AND lg.game_id IS NOT NULL)"#
     )
     .fetch_all(&mut *conn)
@@ -277,6 +292,7 @@ pub(crate) async fn load_schedule_snapshot(
                 leaderboard_id: r.leaderboard_id,
                 disabled_at: r.disabled_at,
                 participants: r.participants,
+                season_active: r.season_active,
             })
             .collect(),
     })
@@ -297,6 +313,7 @@ fn base_eligibility(
         || game.leaderboard_id.is_none()
         || game.disabled_at.is_some()
         || game.participants.is_empty()
+        || !game.season_active
     {
         return None;
     }
@@ -339,6 +356,7 @@ fn reserves_same_ladder(
         && game.leaderboard_id.is_some()
         && game.disabled_at.is_none()
         && !game.participants.is_empty()
+        && game.season_active
         && snapshot
             .at
             .signed_duration_since(game.created_at)
@@ -388,11 +406,15 @@ pub async fn claim_game_start(
     .fetch_one(&mut *tx)
     .await
     .wrap_err("Failed to lock game for start")?;
-    match target.status.as_str() {
-        "running" => return Ok(StartClaim::AlreadyRunning),
-        "finished" | "failed" => return Ok(StartClaim::Terminal),
-        "waiting" => {}
-        other => return Err(eyre!("Unknown game status {other}")),
+    let status = GameStatus::from_str(&target.status)
+        .wrap_err_with(|| format!("Unknown game status {}", target.status))?;
+    // Only Waiting proceeds; a status added later fails closed here instead
+    // of being claimed as if it were waiting.
+    match status {
+        GameStatus::Waiting => {}
+        GameStatus::Running => return Ok(StartClaim::AlreadyRunning),
+        s if s.is_terminal() => return Ok(StartClaim::Terminal),
+        other => return Err(eyre!("Unclaimable game status {}", other.as_str())),
     }
     let roster = sqlx::query_scalar!(
         r#"SELECT DISTINCT COALESCE(gb.battlesnake_id, le.battlesnake_id) AS "snake_id!"
@@ -477,6 +499,7 @@ mod ladder_dispatch_tests {
             leaderboard_id: ladder,
             disabled_at: None,
             participants: snakes.to_vec(),
+            season_active: true,
         }
     }
 
@@ -526,6 +549,54 @@ mod ladder_dispatch_tests {
         snapshot.games[2].participants.clear();
         assert_eq!(
             ladder_eligibility(&snapshot, &snapshot.games[1], 480),
+            Some("free")
+        );
+    }
+
+    /// A waiting game whose season ended is held: never eligible itself, and
+    /// it neither wins FIFO over nor reserves snakes against younger games.
+    #[test]
+    fn expired_season_waiter_is_held_and_reserves_nothing() {
+        let shared = Uuid::from_u128(1);
+        let blocked = Uuid::from_u128(4);
+        let ladder = Uuid::from_u128(2);
+        // FIFO: the older game wins while its season is active...
+        let mut snapshot = ScheduleSnapshot {
+            at: Utc::now(),
+            games: vec![
+                game(1, "waiting", 20, Some(ladder), &[shared]),
+                game(2, "waiting", 10, Some(ladder), &[shared]),
+            ],
+        };
+        assert_eq!(
+            ladder_eligibility(&snapshot, &snapshot.games[0], 480),
+            Some("free")
+        );
+        assert_eq!(ladder_eligibility(&snapshot, &snapshot.games[1], 480), None);
+        // ...and once it expires it is held and the younger game goes.
+        snapshot.games[0].season_active = false;
+        assert_eq!(ladder_eligibility(&snapshot, &snapshot.games[0], 480), None);
+        assert_eq!(
+            ladder_eligibility(&snapshot, &snapshot.games[1], 480),
+            Some("free")
+        );
+
+        // Reservation: a past-deadline waiter blocked by a same-ladder
+        // running game holds its other snake against younger games...
+        let mut snapshot = ScheduleSnapshot {
+            at: Utc::now(),
+            games: vec![
+                game(10, "running", 30, Some(ladder), &[blocked]),
+                game(11, "waiting", 600, Some(ladder), &[blocked, shared]),
+                game(12, "waiting", 10, Some(ladder), &[shared]),
+            ],
+        };
+        assert_eq!(ladder_eligibility(&snapshot, &snapshot.games[1], 480), None);
+        assert_eq!(ladder_eligibility(&snapshot, &snapshot.games[2], 480), None);
+        // ...unless its season ended.
+        snapshot.games[1].season_active = false;
+        assert_eq!(
+            ladder_eligibility(&snapshot, &snapshot.games[2], 480),
             Some("free")
         );
     }
@@ -999,54 +1070,6 @@ where
     Ok(())
 }
 
-// Update the status of a game
-pub async fn update_game_status(
-    pool: &PgPool,
-    game_id: Uuid,
-    status: GameStatus,
-) -> cja::Result<Game> {
-    let status_str = status.as_str();
-
-    let row = sqlx::query!(
-        r#"
-        UPDATE games
-        SET status = $2
-        WHERE game_id = $1
-        RETURNING
-            game_id,
-            board_size,
-            game_type,
-            status,
-            enqueued_at,
-            created_at,
-            updated_at
-        "#,
-        game_id,
-        status_str
-    )
-    .fetch_one(pool)
-    .await
-    .wrap_err_with(|| format!("Failed to update status for game {}", game_id))?;
-
-    let board_size = GameBoardSize::from_str(&row.board_size)
-        .wrap_err_with(|| format!("Invalid board size: {}", row.board_size))?;
-    let game_type = GameType::from_str(&row.game_type)
-        .wrap_err_with(|| format!("Invalid game type: {}", row.game_type))?;
-    let status = GameStatus::from_str(&row.status)
-        .wrap_err_with(|| format!("Invalid game status: {}", row.status))?;
-
-    Ok(Game {
-        game_id: row.game_id,
-        board_size,
-        game_type,
-        status,
-        enqueued_at: row.enqueued_at,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    })
-}
-
-/// Flip a game to `finished` inside an existing transaction, stamping
 /// `finished_at` and clearing any archive bookkeeping — one atomic UPDATE.
 ///
 /// A game the stuck-game sweeper failed mid-run may already carry a
@@ -1055,16 +1078,22 @@ pub async fn update_game_status(
 /// same key (DEV-1980). For never-archived games the clears are no-ops.
 /// The `update_games_updated_at` trigger bumps `updated_at`, which is what
 /// makes the row discoverable again (recent tier watermark).
+///
+/// Guarded transition: only a `running` or `failed` game may be finished. A
+/// game in any other state (already `finished` above all) is left untouched
+/// and this returns an error so the caller's transaction — including
+/// anything written before it — rolls back (DEV-2175).
 pub async fn mark_game_finished_tx(
     conn: &mut sqlx::PgConnection,
     game_id: Uuid,
     finished_at: chrono::DateTime<chrono::Utc>,
 ) -> cja::Result<()> {
-    sqlx::query!(
+    let updated = sqlx::query!(
         r#"UPDATE games
            SET status = $2, finished_at = $3,
                archived_at = NULL, gcs_path = NULL, archive_version = NULL
-           WHERE game_id = $1"#,
+           WHERE game_id = $1
+             AND status IN ('running', 'failed')"#,
         game_id,
         GameStatus::Finished.as_str(),
         finished_at,
@@ -1072,6 +1101,21 @@ pub async fn mark_game_finished_tx(
     .execute(&mut *conn)
     .await
     .wrap_err_with(|| format!("Failed to finish game {game_id}"))?;
+
+    if updated.rows_affected() != 1 {
+        // 0 rows: already finished (or waiting/unknown). Refuse rather than
+        // no-op so the caller's transaction — including placements written
+        // just before this — rolls back; the losing runner's retry then takes
+        // run_game's Finished short-circuit (DEV-2175).
+        tracing::warn!(
+            event_type = "game_double_finish_refused",
+            game_id = %game_id,
+            "Refusing to finish game: status is not 'running' or 'failed'"
+        );
+        return Err(cja::color_eyre::eyre::eyre!(
+            "Refusing to finish game {game_id}: status is not 'running' or 'failed'"
+        ));
+    }
 
     // A Finished game must never keep resume state.
     crate::models::resume_state::delete_resume_state(&mut *conn, game_id).await?;
@@ -1216,6 +1260,27 @@ mod tests {
     }
 
     #[test]
+    fn game_status_is_terminal_only_for_finished_and_failed() {
+        assert!(!GameStatus::Waiting.is_terminal());
+        assert!(!GameStatus::Running.is_terminal());
+        assert!(GameStatus::Finished.is_terminal());
+        assert!(GameStatus::Failed.is_terminal());
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn games_status_check_rejects_unknown_status(pool: sqlx::PgPool) {
+        let err = sqlx::query(
+            "INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'bogus')",
+        )
+        .execute(&pool)
+        .await
+        .expect_err("bogus status must be rejected by games_status_domain");
+        let db = err.as_database_error().expect("expected a database error");
+        assert_eq!(db.code().as_deref(), Some("23514")); // check_violation
+        assert_eq!(db.constraint(), Some("games_status_domain"));
+    }
+
+    #[test]
     fn game_type_from_str_case_insensitive() {
         assert_eq!(GameType::from_str("Standard").unwrap(), GameType::Standard);
         assert_eq!(GameType::from_str("standard").unwrap(), GameType::Standard);
@@ -1293,8 +1358,8 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn solo_game_round_trips_through_db(pool: sqlx::PgPool) -> cja::Result<()> {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (7302, 'solo-user', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (7302, 'solo-user') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -1346,8 +1411,8 @@ mod tests {
 
     async fn rematch_user(pool: &PgPool, id: i64) -> cja::Result<Uuid> {
         Ok(sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(id)
         .bind(format!("rematch-user-{id}"))
@@ -1430,6 +1495,50 @@ mod tests {
             .fetch_one(&pool)
             .await?;
         assert_eq!(before, after);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn owned_creation_rejects_retired_snake_and_restores_after_unretire(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        use crate::models::battlesnake::{
+            self, RetireBattlesnakeOutcome, UnretireBattlesnakeOutcome,
+        };
+        let creator = rematch_user(&pool, 262020).await?;
+        let other = rematch_user(&pool, 262021).await?;
+        let snake = rematch_snake(&pool, other, "Veteran", "public").await?;
+        let spec = || CreateGameWithSnakes {
+            board_size: GameBoardSize::Medium,
+            game_type: GameType::Standard,
+            battlesnake_ids: vec![snake],
+        };
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM games")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(
+            battlesnake::retire_battlesnake(&pool, snake, other).await?,
+            RetireBattlesnakeOutcome::Retired {
+                withdrawn_registrations: 0
+            }
+        );
+        let error = create_game_with_snakes_for_user(&pool, spec(), creator)
+            .await
+            .unwrap_err();
+        assert!(error.downcast_ref::<InaccessibleBattlesnake>().is_some());
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM games")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(before, after);
+        assert_eq!(
+            battlesnake::unretire_battlesnake(&pool, snake, other).await?,
+            UnretireBattlesnakeOutcome::Unretired
+        );
+        create_game_with_snakes_for_user(&pool, spec(), creator).await?;
+        let restored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM games")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(restored, before + 1);
         Ok(())
     }
 
@@ -1530,7 +1639,7 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         sqlx::query!(
-            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))",
             leaderboard_id,
             ladder.game_id
         )
@@ -1592,7 +1701,7 @@ mod tests {
         )
         .fetch_one(&pool)
         .await?;
-        sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
+        sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))")
             .bind(ladder)
             .bind(ladder_game.game_id)
             .execute(&pool)
@@ -1615,24 +1724,25 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         let entry = sqlx::query_scalar!(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-            VALUES ($1, $2) RETURNING leaderboard_entry_id",
+            "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+            VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2) RETURNING leaderboard_entry_id",
             leaderboard_id,
             snake
         )
         .fetch_one(&pool)
         .await?;
+        crate::routes::test_support::register_snake_entries(&pool, snake).await;
         let game_id = sqlx::query_scalar!("INSERT INTO games (board_size, game_type) VALUES ('11x11', 'Standard') RETURNING game_id")
             .fetch_one(&pool).await?;
         add_leaderboard_entry_to_game(&pool, game_id, entry).await?;
         sqlx::query!(
-            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))",
             leaderboard_id,
             game_id
         )
         .execute(&pool)
         .await?;
-        sqlx::query!("UPDATE leaderboard_entries SET disabled_at = clock_timestamp() WHERE leaderboard_entry_id = $1", entry)
+        sqlx::query!("UPDATE leaderboard_registrations r SET disabled_at = clock_timestamp() FROM leaderboard_entries le WHERE le.leaderboard_entry_id = $1 AND r.leaderboard_id = le.leaderboard_id AND r.battlesnake_id = le.battlesnake_id", entry)
             .execute(&pool).await?;
         sqlx::query!(
             "UPDATE leaderboards SET disabled_at = clock_timestamp() WHERE leaderboard_id = $1",
@@ -1727,7 +1837,7 @@ mod tests {
                 },
             )
             .await?;
-            sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
+            sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))")
                 .bind(ladder)
                 .bind(game.game_id)
                 .execute(&pool)
@@ -1816,7 +1926,7 @@ mod tests {
         let mut ids = Vec::new();
         for (snakes, age) in [(vec![t], 200), (vec![a, t], 100), (vec![a], 50)] {
             let g = create_game_with_snakes(&pool, mk(snakes)).await?;
-            sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
+            sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))")
                 .bind(ladder)
                 .bind(g.game_id)
                 .execute(&pool)
@@ -1890,8 +2000,8 @@ mod tests {
         use crate::engine::GameSource;
 
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (7303, 'source-user', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (7303, 'source-user') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -1926,7 +2036,7 @@ mod tests {
         // Ladder only.
         let ladder_game = bare_game(&pool).await?;
         sqlx::query!(
-            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))",
             leaderboard,
             ladder_game
         )
@@ -1946,7 +2056,7 @@ mod tests {
         // Both rows: tournament wins (the flip this test pins).
         let both_game = bare_game(&pool).await?;
         sqlx::query!(
-            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))",
             leaderboard,
             both_game
         )
@@ -1974,6 +2084,275 @@ mod tests {
             assert_eq!(source, expected, "game {game_id}");
             assert_eq!(source.analytics_label(), label, "game {game_id}");
         }
+        Ok(())
+    }
+
+    // --- DEV-2175: guarded finish transition ---
+
+    use std::time::Duration;
+
+    /// Insert a bare game row (no snakes) with the given status — same shape
+    /// as game_runner's fixture_game.
+    async fn fixture_bare_game(pool: &sqlx::PgPool, status: &str) -> cja::Result<Uuid> {
+        let game_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO games (board_size, game_type, status)
+             VALUES ('11x11', 'Standard', $1) RETURNING game_id",
+        )
+        .bind(status)
+        .fetch_one(pool)
+        .await?;
+        Ok(game_id)
+    }
+
+    /// Wait until `n` sessions in this test's database are blocked on a lock
+    /// (verbatim from leaderboard_ratings — count pg_stat_activity rows with
+    /// wait_event_type = 'Lock' scoped to this database only; matching on
+    /// blocking pids or query text flakes).
+    async fn wait_for_lock_waiters(pool: &sqlx::PgPool, n: i64) -> cja::Result<()> {
+        for _ in 0..500 {
+            let waiting = sqlx::query_scalar!(
+                r#"SELECT COUNT(*) AS "count!" FROM pg_stat_activity
+                   WHERE datname = current_database() AND wait_event_type = 'Lock'"#
+            )
+            .fetch_one(pool)
+            .await?;
+            if waiting >= n {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Err(cja::color_eyre::eyre::eyre!(
+            "timed out waiting for {n} lock waiters"
+        ))
+    }
+
+    /// DEV-2175: a second finish on an already-finished game must error and
+    /// change nothing — including archive bookkeeping a real archiver wrote
+    /// after the first finish.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn second_finish_on_a_finished_game_errors_and_changes_nothing(
+        pool: sqlx::PgPool,
+    ) -> cja::Result<()> {
+        let game_id = fixture_bare_game(&pool, "running").await?;
+
+        // First finish: succeeds and commits.
+        let mut tx = pool.begin().await?;
+        mark_game_finished_tx(&mut tx, game_id, chrono::Utc::now()).await?;
+        tx.commit().await?;
+
+        // Stand in for a real archiver's bookkeeping: the refused finish
+        // must not be able to clear it.
+        sqlx::query(
+            "UPDATE games
+             SET archived_at = NOW() - interval '1 day',
+                 gcs_path = 'gs://test/game.json',
+                 archive_version = 3
+             WHERE game_id = $1",
+        )
+        .bind(game_id)
+        .execute(&pool)
+        .await?;
+
+        #[derive(sqlx::FromRow)]
+        struct FinishGuardRow {
+            status: String,
+            finished_at: Option<chrono::DateTime<chrono::Utc>>,
+            archived_at: Option<chrono::DateTime<chrono::Utc>>,
+            gcs_path: Option<String>,
+            archive_version: Option<i32>,
+            updated_at: chrono::DateTime<chrono::Utc>,
+        }
+        async fn read_row(pool: &sqlx::PgPool, game_id: Uuid) -> cja::Result<FinishGuardRow> {
+            Ok(sqlx::query_as(
+                "SELECT status, finished_at, archived_at, gcs_path, archive_version, updated_at
+                     FROM games WHERE game_id = $1",
+            )
+            .bind(game_id)
+            .fetch_one(pool)
+            .await?)
+        }
+
+        let before = read_row(&pool, game_id).await?;
+
+        // Second finish: refused, and its uncommitted transaction (which the
+        // caller would have written placements into) rolls back on drop.
+        let mut tx = pool.begin().await?;
+        let result = mark_game_finished_tx(&mut tx, game_id, chrono::Utc::now()).await;
+        assert!(result.is_err(), "second finish must error, not no-op");
+        drop(tx);
+
+        let after = read_row(&pool, game_id).await?;
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.finished_at, before.finished_at);
+        assert_eq!(after.archived_at, before.archived_at);
+        assert_eq!(after.gcs_path, before.gcs_path);
+        assert_eq!(after.archive_version, before.archive_version);
+        assert_eq!(after.updated_at, before.updated_at);
+
+        Ok(())
+    }
+
+    /// DEV-1980 both-ways control: a `failed` game (e.g. one the sweeper
+    /// failed mid-run) can still be finished by a live runner — `failed`
+    /// stays in the guard's allowed from-states.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn finishing_a_failed_game_is_still_allowed(pool: sqlx::PgPool) -> cja::Result<()> {
+        let game_id = fixture_bare_game(&pool, "failed").await?;
+
+        let mut tx = pool.begin().await?;
+        mark_game_finished_tx(&mut tx, game_id, chrono::Utc::now()).await?;
+        tx.commit().await?;
+
+        let status: String = sqlx::query_scalar("SELECT status FROM games WHERE game_id = $1")
+            .bind(game_id)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(status, "finished");
+
+        Ok(())
+    }
+
+    /// No caller legitimately finishes a `waiting` game (the runner always
+    /// claims it to `running` first) — the guard refuses it.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn finishing_a_waiting_game_is_refused(pool: sqlx::PgPool) -> cja::Result<()> {
+        let game_id = fixture_bare_game(&pool, "waiting").await?;
+
+        let mut tx = pool.begin().await?;
+        assert!(
+            mark_game_finished_tx(&mut tx, game_id, chrono::Utc::now())
+                .await
+                .is_err()
+        );
+        drop(tx);
+
+        let status: String = sqlx::query_scalar("SELECT status FROM games WHERE game_id = $1")
+            .bind(game_id)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(status, "waiting");
+
+        Ok(())
+    }
+
+    /// DEV-2175's actual race shape: the straggler's finish UPDATE is
+    /// mid-flight (blocked on the games row lock) when the winner commits.
+    /// Under READ COMMITTED the blocked UPDATE re-evaluates against the new
+    /// row version, matches 0 rows, and the whole straggler transaction
+    /// errors — the winner's result stands untouched.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn concurrent_second_finish_loses_cleanly(pool: sqlx::PgPool) -> cja::Result<()> {
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
+        )
+        .bind(161_400_i64)
+        .bind("finish-race-user")
+        .bind("test-token")
+        .fetch_one(&pool)
+        .await?;
+
+        async fn insert_snake(pool: &sqlx::PgPool, user_id: Uuid, name: &str) -> cja::Result<Uuid> {
+            Ok(sqlx::query_scalar(
+                "INSERT INTO battlesnakes (user_id, name, url)
+                     VALUES ($1, $2, 'http://example.com') RETURNING battlesnake_id",
+            )
+            .bind(user_id)
+            .bind(name)
+            .fetch_one(pool)
+            .await?)
+        }
+        // Real snakes, not random UUIDs: match_games.winner_id carries an FK
+        // to battlesnakes, so an arbitrary id would fail the FK and make the
+        // guard look like it works when it doesn't.
+        let snake_a = insert_snake(&pool, user_id, "finish-race-a").await?;
+        let snake_b = insert_snake(&pool, user_id, "finish-race-b").await?;
+
+        let tournament_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO tournaments (name, user_id) VALUES ('finish race', $1) RETURNING tournament_id",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await?;
+        let match_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO tournament_matches (tournament_id, round, position, visual_column, visual_row)
+             VALUES ($1, 1, 0, 0, 0) RETURNING match_id",
+        )
+        .bind(tournament_id)
+        .fetch_one(&pool)
+        .await?;
+
+        let game_id = fixture_bare_game(&pool, "running").await?;
+        let match_game_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO match_games (match_id, game_id, game_number)
+             VALUES ($1, $2, 1) RETURNING match_game_id",
+        )
+        .bind(match_id)
+        .bind(game_id)
+        .fetch_one(&pool)
+        .await?;
+
+        let finished_at = chrono::Utc::now();
+
+        // Holder: finish + record winner_a, NOT committed — holds the row locks.
+        let mut holder = pool.begin().await?;
+        mark_game_finished_tx(&mut holder, game_id, finished_at).await?;
+        crate::models::tournament::set_match_game_winner(
+            &mut *holder,
+            match_game_id,
+            Some(snake_a),
+        )
+        .await?;
+
+        // Straggler finish on a second connection: its mark_game_finished_tx
+        // UPDATE blocks on the games row lock. No deadlock is possible: the
+        // holder locks games then match_games; the straggler only ever waits
+        // on the games row.
+        let p = pool.clone();
+        let second = tokio::spawn(async move {
+            let outcome: cja::Result<()> = async {
+                let mut tx = p.begin().await?;
+                mark_game_finished_tx(&mut tx, game_id, chrono::Utc::now()).await?;
+                crate::models::tournament::set_match_game_winner(
+                    &mut *tx,
+                    match_game_id,
+                    Some(snake_b),
+                )
+                .await?;
+                Ok(tx.commit().await?)
+            }
+            .await;
+            outcome
+        });
+        wait_for_lock_waiters(&pool, 1).await?;
+
+        holder.commit().await?;
+
+        let second = tokio::time::timeout(Duration::from_secs(30), second).await??;
+        assert!(
+            second.is_err(),
+            "straggler finish must error, not overwrite"
+        );
+
+        let winner_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT winner_id FROM match_games WHERE match_game_id = $1")
+                .bind(match_game_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(winner_id, Some(snake_a));
+
+        let (status, stored_finished_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
+            sqlx::query_as("SELECT status, finished_at FROM games WHERE game_id = $1")
+                .bind(game_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(status, "finished");
+        // timestamptz truncates to microseconds; compare at that precision.
+        assert_eq!(
+            stored_finished_at.map(|t| t.timestamp_micros()),
+            Some(finished_at.timestamp_micros())
+        );
+
         Ok(())
     }
 }

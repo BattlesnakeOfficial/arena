@@ -100,6 +100,19 @@ pub struct EngineGame {
     pub snake_timeout: i32,
     #[serde(rename = "MaxTurns", default)]
     pub max_turns: i32,
+    /// "multi-player"/"team"/"single-player" — present on 994 pre-July-2020
+    /// games (DEV-2344). Absent on everything else; `skip_serializing_if`
+    /// keeps other games' serialized bytes identical.
+    #[serde(rename = "Mode", default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// A JSON number in the engine (always 12; 815 headers, DEV-2344). `i32`
+    /// matches the sibling `MaxTurns`.
+    #[serde(
+        rename = "MaxTurnsToNextFoodSpawn",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_turns_to_next_food_spawn: Option<i32>,
     #[serde(rename = "FoodSpawns", default)]
     pub food_spawns: Vec<PointOnTurn>,
     #[serde(rename = "HazardSpawns", default)]
@@ -184,6 +197,11 @@ pub struct EngineSnake {
     pub shout: Option<String>,
     #[serde(rename = "Squad")]
     pub squad: Option<String>,
+    /// Team-mode team name (DEV-2344): non-empty in 403 team-mode games
+    /// (2020-03-27 to 2020-07-17), `""` elsewhere. Absent ⇒ `None` ⇒
+    /// omitted on serialize, so other games' bytes don't change.
+    #[serde(rename = "Team", default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<String>,
     #[serde(
         rename = "APIVersion",
         default,
@@ -345,5 +363,78 @@ mod tests {
 
         let point: Point = serde_json::from_str("{}").unwrap();
         assert_eq!((point.x, point.y), (0, 0));
+    }
+
+    /// DEV-2344: snake `Team`, header `Mode`, and header
+    /// `MaxTurnsToNextFoodSpawn` parse and re-serialize with their values
+    /// intact — `Team`/`Mode` as strings, `MaxTurnsToNextFoodSpawn` as a
+    /// JSON NUMBER (an `Option<String>` would fail all 815 real headers).
+    #[test]
+    fn team_mode_maxturns_round_trip() {
+        let game: EngineGame = serde_json::from_value(serde_json::json!({
+            "ID": "g-2344",
+            "Status": "complete",
+            "Source": null,
+            "RulesetName": "standard",
+            "RulesStages": null,
+            "Map": "standard",
+            "Mode": "team",
+            "MaxTurnsToNextFoodSpawn": 12,
+        }))
+        .unwrap();
+        assert_eq!(game.mode.as_deref(), Some("team"));
+        assert_eq!(game.max_turns_to_next_food_spawn, Some(12));
+
+        let game_value = serde_json::to_value(&game).unwrap();
+        assert_eq!(game_value["Mode"], "team");
+        assert!(game_value["MaxTurnsToNextFoodSpawn"].is_number());
+        assert_eq!(game_value["MaxTurnsToNextFoodSpawn"], serde_json::json!(12));
+
+        let snake: EngineSnake = serde_json::from_value(serde_json::json!({
+            "ID": "s1", "Name": "Snek", "Team": "Orb Weavers",
+        }))
+        .unwrap();
+        assert_eq!(snake.team.as_deref(), Some("Orb Weavers"));
+        let snake_value = serde_json::to_value(&snake).unwrap();
+        assert_eq!(snake_value["Team"], "Orb Weavers");
+
+        // The engine also writes `""` outside team mode: parses to Some("")
+        // and serializes as an empty string.
+        let snake: EngineSnake = serde_json::from_value(serde_json::json!({
+            "ID": "s2", "Name": "Solo", "Team": "",
+        }))
+        .unwrap();
+        assert_eq!(snake.team.as_deref(), Some(""));
+        assert_eq!(serde_json::to_value(&snake).unwrap()["Team"], "");
+    }
+
+    /// DEV-2344: without the three keys the fields are `None` and the
+    /// serialized output contains none of them — the pin that other
+    /// games' archived bytes stay byte-identical.
+    #[test]
+    fn team_mode_maxturns_absent_keys_are_omitted() {
+        let game: EngineGame = serde_json::from_value(serde_json::json!({
+            "ID": "g-absent",
+            "Status": "complete",
+            "Source": null,
+            "RulesetName": "standard",
+            "RulesStages": null,
+            "Map": "standard",
+        }))
+        .unwrap();
+        assert!(game.mode.is_none());
+        assert!(game.max_turns_to_next_food_spawn.is_none());
+        let game_json = serde_json::to_vec(&game).unwrap();
+        let game_str = String::from_utf8(game_json).unwrap();
+        assert!(!game_str.contains("\"Mode\""));
+        assert!(!game_str.contains("\"MaxTurnsToNextFoodSpawn\""));
+
+        let snake: EngineSnake = serde_json::from_value(serde_json::json!({
+            "ID": "s1", "Name": "Snek",
+        }))
+        .unwrap();
+        assert!(snake.team.is_none());
+        let snake_json = String::from_utf8(serde_json::to_vec(&snake).unwrap()).unwrap();
+        assert!(!snake_json.contains("\"Team\""));
     }
 }

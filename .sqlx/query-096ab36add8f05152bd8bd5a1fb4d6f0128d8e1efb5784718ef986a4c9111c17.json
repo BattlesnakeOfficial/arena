@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT t.tournament_id\n        FROM tournaments t\n        JOIN tournament_matches m ON m.tournament_id = t.tournament_id AND m.round = t.current_round\n        WHERE t.status = 'in_progress'\n        GROUP BY t.tournament_id\n        HAVING bool_and(m.status IN ('completed', 'canceled'))\n           AND max(m.updated_at) < $1\n        ORDER BY t.tournament_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tournament_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "096ab36add8f05152bd8bd5a1fb4d6f0128d8e1efb5784718ef986a4c9111c17"
+}

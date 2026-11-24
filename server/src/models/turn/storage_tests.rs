@@ -196,7 +196,7 @@ async fn snake_insert_failure_is_identified_inside_its_turn(database: PgPool) {
 async fn successful_snake_insert_keeps_values_and_emits_completion(pool: PgPool) {
     let capture = Capture::shared();
     let game_id = game(&pool).await;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (7310, 'storage-test', 'test-token') RETURNING user_id")
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login) VALUES (7310, 'storage-test') RETURNING user_id")
         .fetch_one(&pool).await.unwrap();
     let snake_id = sqlx::query_scalar!("INSERT INTO battlesnakes (user_id, name, url, visibility) VALUES ($1, 'Storage Snake', 'http://localhost:8000', 'public') RETURNING battlesnake_id", user_id)
         .fetch_one(&pool).await.unwrap();
@@ -264,10 +264,6 @@ fn rich_resume(snake_a: Uuid, snake_b: Uuid, turn: i32) -> crate::engine::resume
                 latency_ms: Some(123),
                 shout: Some("hello".to_owned()),
                 food_eaten: 2,
-                death_turn: None,
-                death_cause: None,
-                death_eliminated_by: None,
-                death_order: None,
                 body: serde_json::json!([{"x": 5, "y": 5}, {"x": 4, "y": 5}, {"x": 3, "y": 5}]),
             },
             crate::engine::resume::ResumeSnakeRecord {
@@ -281,10 +277,6 @@ fn rich_resume(snake_a: Uuid, snake_b: Uuid, turn: i32) -> crate::engine::resume
                 latency_ms: None,
                 shout: None,
                 food_eaten: 0,
-                death_turn: Some(turn),
-                death_cause: Some("wall-collision".to_owned()),
-                death_eliminated_by: Some(String::new()),
-                death_order: Some(0),
                 body: serde_json::json!([{"x": -1, "y": 5}, {"x": 0, "y": 5}, {"x": 1, "y": 5}]),
             },
         ],
@@ -295,8 +287,8 @@ fn rich_resume(snake_a: Uuid, snake_b: Uuid, turn: i32) -> crate::engine::resume
 async fn persist_turn_writes_turn_moves_and_resume_state_atomically(pool: PgPool) {
     let game_id = game(&pool).await;
     let user_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (external_github_id, github_login, github_access_token)
-         VALUES (7311, 'persist-turn-owner', 'test-token') RETURNING user_id",
+        "INSERT INTO users (external_github_id, github_login)
+         VALUES (7311, 'persist-turn-owner') RETURNING user_id",
     )
     .fetch_one(&pool)
     .await
@@ -398,18 +390,10 @@ async fn persist_turn_writes_turn_moves_and_resume_state_atomically(pool: PgPool
     assert_eq!(a.latency_ms, Some(123));
     assert_eq!(a.shout.as_deref(), Some("hello"));
     assert_eq!(a.food_eaten, 2);
-    assert_eq!(
-        (a.death_turn, a.death_cause.as_deref(), a.death_order),
-        (None, None, None)
-    );
     let b = by_id(snake_b);
     assert_eq!(b.eliminated_cause, "out_of_bounds");
     assert_eq!(b.last_move, None);
     assert!(!b.context_present);
-    assert_eq!(
-        (b.death_turn, b.death_cause.as_deref(), b.death_order),
-        (Some(4), Some("wall-collision"), Some(0))
-    );
 
     // A second persist_turn at T+1 UPDATES the same single state row.
     let mut next = rich_resume(snake_a, snake_b, 5);

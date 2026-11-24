@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use cja::jobs::worker::IdlePollGate;
 use color_eyre::eyre::{Context as _, eyre};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{PgPool, migrate::Migrator, postgres::PgPoolOptions};
 use std::num::NonZeroUsize;
 
 use crate::config::AppConfig;
@@ -57,6 +57,56 @@ pub struct AppState {
     pub archive: crate::archive::ArchiveReader,
 }
 
+const MIGRATION_LOCK_ID: i64 = 0xDB_DB_DB_DB_DB_DB_DB;
+
+async fn run_migrations_with_lock(pool: &PgPool, migrator: &Migrator) -> cja::Result<()> {
+    let mut conn = pool.acquire().await?;
+    conn.close_on_drop();
+    // Poll for the lock instead of blocking in pg_advisory_lock: a session
+    // parked in that statement holds an open snapshot, so a concurrent
+    // CREATE INDEX CONCURRENTLY run by the lock holder waits on the waiter's
+    // virtualxid while the waiter waits on the advisory lock. Postgres then
+    // detects the cycle, aborts the index build, and leaves an INVALID index
+    // that a later `indisvalid` assertion turns into a permanent boot
+    // failure. Each pg_try_advisory_lock attempt is a short statement, so no
+    // booter ever holds an open transaction while waiting for the lock.
+    loop {
+        let acquired: bool = sqlx::query_scalar!(
+            r#"SELECT pg_try_advisory_lock($1) AS "acquired!""#,
+            MIGRATION_LOCK_ID
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        if acquired {
+            break;
+        }
+        tracing::debug!(lock_id = MIGRATION_LOCK_ID, "migration lock held elsewhere");
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    let migration_result = migrator.run(&mut *conn).await;
+    let unlock_result: cja::Result<()> = async {
+        let unlocked: bool = sqlx::query_scalar!(
+            r#"SELECT pg_advisory_unlock($1) AS "unlocked!""#,
+            MIGRATION_LOCK_ID
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        if !unlocked {
+            return Err(eyre!("Failed to unlock migration lock"));
+        }
+        Ok(())
+    }
+    .await;
+    let close_result = conn.close().await;
+
+    migration_result?;
+    unlock_result?;
+    close_result?;
+    tracing::info!("Migration lock unlocked");
+    Ok(())
+}
+
 impl AppState {
     /// Turn resolved [`AppConfig`] into live resources (pools, clients).
     /// All environment reading already happened in [`AppConfig::from_env`].
@@ -65,36 +115,12 @@ impl AppState {
         secrets: Option<&crate::secrets::AppSecrets>,
     ) -> cja::Result<Self> {
         async fn setup_db_pool(database_url: &str, max_connections: u32) -> cja::Result<PgPool> {
-            const MIGRATION_LOCK_ID: i64 = 0xDB_DB_DB_DB_DB_DB_DB;
-
             let pool = PgPoolOptions::new()
                 .max_connections(max_connections)
                 .acquire_timeout(std::time::Duration::from_secs(60))
                 .connect(database_url)
                 .await?;
-
-            sqlx::query!("SELECT pg_advisory_lock($1)", MIGRATION_LOCK_ID)
-                .execute(&pool)
-                .await?;
-
-            sqlx::migrate!("../migrations").run(&pool).await?;
-
-            let unlock_result = sqlx::query!("SELECT pg_advisory_unlock($1)", MIGRATION_LOCK_ID)
-                .fetch_one(&pool)
-                .await?
-                .pg_advisory_unlock;
-
-            match unlock_result {
-                Some(b) => {
-                    if b {
-                        tracing::info!("Migration lock unlocked");
-                    } else {
-                        tracing::info!("Failed to unlock migration lock");
-                    }
-                }
-                None => return Err(eyre!("Failed to unlock migration lock")),
-            }
-
+            run_migrations_with_lock(&pool, &sqlx::migrate!("../migrations")).await?;
             Ok(pool)
         }
 
@@ -161,6 +187,12 @@ impl AppState {
             Some(mailgun) => {
                 let email_client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(10))
+                    // A connect-phase deadline that surfaces as a *connect*
+                    // error (so `SendError` can classify it definite
+                    // non-delivery and shutdown reservations get released)
+                    // instead of burning the whole total timeout and landing
+                    // in the ambiguous no-response bucket.
+                    .connect_timeout(std::time::Duration::from_secs(5))
                     .build()
                     .wrap_err("Failed to create email HTTP client")?;
                 tracing::info!(domain = %mailgun.domain, "Mailgun configured for email");
@@ -211,10 +243,7 @@ impl AppState {
             tracing::info!("TYPESAFE_API_KEY not set, Jev moderation disabled");
         }
 
-        let mut scoring_registry = crate::scoring::ScoringRegistry::new();
-        scoring_registry.register(Box::new(crate::scoring::weng_lin::WengLinScoring));
-        scoring_registry.register(Box::new(crate::scoring::win_rate::WinRateScoring));
-        scoring_registry.register(Box::new(crate::scoring::food_eaten::FoodEatenScoring));
+        let scoring_registry = crate::scoring::default_registry();
 
         let home_feed_cache = Arc::new(crate::cache::TtlCell::new(std::time::Duration::from_secs(
             config.home_feed_cache_secs,
@@ -325,5 +354,169 @@ impl cja::app_state::AppState for AppState {
 
     fn cookie_key(&self) -> &cja::server::cookies::CookieKey {
         &self.cookie_key
+    }
+
+    fn eyes_base_url(&self) -> Option<&str> {
+        Some(crate::config::ARENA_PUBLIC_BASE_URL)
+    }
+
+    fn eyes_http_monitors(&self) -> Vec<cja::app_state::HttpMonitor> {
+        crate::observability::http_monitors(self.config.features.server)
+    }
+}
+
+#[cfg(test)]
+mod migration_lock_tests {
+    use super::{MIGRATION_LOCK_ID, run_migrations_with_lock};
+    use sqlx::{PgPool, migrate::Migrator};
+    use std::time::Duration;
+
+    async fn exercise(pool: PgPool, sql: &str, should_fail: bool) {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("20261121130000_probe.sql"), sql).unwrap();
+        let migrator = Migrator::new(directory.path()).await.unwrap();
+        let migration_pool = pool.clone();
+        let directory_guard = directory;
+        let migration = async move {
+            let _directory_guard = directory_guard;
+            run_migrations_with_lock(&migration_pool, &migrator).await
+        };
+
+        let observer = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let pid: Option<i32> = sqlx::query_scalar(
+                    "SELECT a.pid FROM pg_stat_activity a JOIN pg_locks l ON l.pid = a.pid
+                     WHERE a.pid <> pg_backend_pid() AND a.datname = current_database() AND a.state = 'active'
+                       AND a.query LIKE '%pg_sleep%'
+                       AND l.locktype = 'advisory' AND l.granted
+                       AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                       AND l.classid::text::bigint = ($1::bigint >> 32)
+                       AND l.objid::text::bigint = ($1::bigint & 4294967295)
+                     LIMIT 1",
+                )
+                .bind(MIGRATION_LOCK_ID)
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+                if let Some(pid) = pid {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+        let (result, holder) = tokio::join!(migration, observer);
+        let holder = holder.expect("migrator must hold the application lock on its own backend");
+        if should_fail {
+            let message = result.unwrap_err().to_string();
+            assert!(message.contains("sentinel migration failure"), "{message}");
+        } else {
+            result.unwrap();
+        }
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE pid = $1")
+                .bind(holder)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 0, "migration backend must be closed");
+        // pg_locks is cluster-wide while each #[sqlx::test] runs in its own
+        // database: scope to this database so a sibling test's advisory lock
+        // (the success/failure probes and the CIC test all hold the same key
+        // concurrently) is not counted here.
+        let locks: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted
+               AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+               AND classid::text::bigint = ($1::bigint >> 32)
+               AND objid::text::bigint = ($1::bigint & 4294967295)",
+        )
+        .bind(MIGRATION_LOCK_ID)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(locks, 0);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn application_migrator_runs_on_disposable_database(pool: PgPool) {
+        run_migrations_with_lock(&pool, &sqlx::migrate!("../migrations"))
+            .await
+            .unwrap();
+        let seasons: i64 = sqlx::query_scalar("SELECT count(*) FROM leaderboard_seasons")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let leagues: i64 = sqlx::query_scalar("SELECT count(*) FROM leaderboards")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(seasons, leagues);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn migration_lock_uses_migrator_backend_on_success(pool: PgPool) {
+        exercise(pool, "SELECT pg_sleep(2);", false).await;
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn migration_lock_uses_migrator_backend_on_failure(pool: PgPool) {
+        exercise(
+            pool,
+            "DO $$ BEGIN PERFORM pg_sleep(2); RAISE EXCEPTION 'sentinel migration failure'; END $$;",
+            true,
+        )
+        .await;
+    }
+
+    // Regression: a blocking `pg_advisory_lock` wait keeps the statement (and
+    // its snapshot) open, so when the lock holder reaches a CREATE INDEX
+    // CONCURRENTLY migration the two sessions wait on each other, Postgres
+    // reports a deadlock, the index build aborts, and the leftover INVALID
+    // index would fail every later boot. A second booter using the polling
+    // helper must coexist with a concurrent index build instead.
+    #[sqlx::test(migrations = false)]
+    async fn concurrent_lock_waiter_survives_concurrent_index_build(pool: PgPool) {
+        let index_directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            index_directory.path().join("20261121130100_probe.sql"),
+            "CREATE TABLE deadlock_probe (id integer);\nSELECT pg_sleep(2);",
+        )
+        .unwrap();
+        std::fs::write(
+            index_directory.path().join("20261121130200_probe_cic.sql"),
+            "-- no-transaction\nCREATE INDEX CONCURRENTLY IF NOT EXISTS deadlock_probe_idx ON deadlock_probe (id);",
+        )
+        .unwrap();
+        // Both booters resolve the same migrations: a migrator whose set is
+        // missing a version another booter already applied is rejected by
+        // sqlx (VersionMissing), so the waiter replays this set as a no-op
+        // after the index runner finishes. What is under test is the wait
+        // protocol around the lock, not the waiter's own migrations.
+        let migrator = Migrator::new(index_directory.path()).await.unwrap();
+
+        // The index runner acquires the lock first and spends two seconds in
+        // its first migration, so the waiter is guaranteed to be waiting (in
+        // whatever protocol it uses) by the time the concurrent index build
+        // starts. With the old blocking wait that overlap deadlocked.
+        let index_pool = pool.clone();
+        let (index_run, waiter_run) = tokio::join!(
+            async { run_migrations_with_lock(&index_pool, &migrator).await },
+            async {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                run_migrations_with_lock(&pool, &migrator).await
+            }
+        );
+        index_run.unwrap();
+        waiter_run.unwrap();
+
+        let valid: bool = sqlx::query_scalar(
+            "SELECT indisvalid FROM pg_index WHERE indexrelid = 'deadlock_probe_idx'::regclass",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            valid,
+            "concurrent index must be valid after a contended boot"
+        );
     }
 }

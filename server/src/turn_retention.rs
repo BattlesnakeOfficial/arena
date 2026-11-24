@@ -17,8 +17,10 @@
 //!   `pg_notify('arena_watched_games', 'reset:<game_id>')` at commit.
 //!   `watched_games.rs` turns that into `WatchedGameUpdate::Reset` — a
 //!   no-op for unwatched games, the correct signal for a viewer on an
-//!   archive-served page. The shared 1-permit `BACKUP_SLOT` keeps at most
-//!   one prune commit in flight.
+//!   archive-served page. The shared `"archive"` cja concurrency key
+//!   (DEV-2432, declared in `jobs.rs`) keeps at most one archive-family
+//!   attempt per process and bounds it at `MAX_RUNTIME`, so a hung
+//!   prune can park zero workers.
 //! - **`updated_at` bump**: the `turns_pruned_at` UPDATE bumps
 //!   `games.updated_at` via the `update_games_updated_at` trigger, exposed
 //!   by public list/detail APIs — a pruned month-old game reports
@@ -37,16 +39,23 @@
 //!   NULL`, so no archive ever contained them, and every reader of old
 //!   games' frames requires `frame_data`, so such rows are invisible to
 //!   all of them.
-//! - **Fail-closed retention**: a game whose object is missing or
-//!   content-mismatched keeps `turns_pruned_at IS NULL`, stays in
-//!   `games_turns_prunable_idx`, is re-enqueued hourly, re-fails, and
-//!   re-logs the ERROR hourly. `PRUNE_DISCOVERY_CAP`+ such games stall
-//!   pruning entirely (visible as discovery candidates that never
-//!   shrink); the remedy is clearing the archive pointers
+//! - **Fail-closed retention**: a game whose object is missing,
+//!   undecodable, wrong-version, wrong-id, or content-diverged keeps
+//!   `turns_pruned_at IS NULL`, stays in `games_turns_prunable_idx`, is
+//!   re-enqueued hourly, re-fails, and re-logs the ERROR hourly. The
+//!   remedy for permanently stuck games is clearing the archive pointers
 //!   (`UPDATE games SET archived_at = NULL, gcs_path = NULL,
 //!   archive_version = NULL WHERE game_id = …`) so DEV-1980 discovery
 //!   re-archives — `native_gcs_path` is deterministic, so the re-archive
-//!   overwrites the bad object at the same key.
+//!   overwrites the bad object at the same key. On a pruned game that
+//!   UPDATE is rejected by the `games_pruned_requires_archive_check`
+//!   CHECK (DEV-2178: pruned ⇒ archive pointers set) — correctly, since
+//!   those pointers name the game's only surviving frame copy. The one
+//!   self-healing exception: a prefix-confirmed count mismatch (stale
+//!   archive — the sweeper race left the object holding a strict PREFIX
+//!   of the DB's frames) auto-clears the pointers via
+//!   `clear_stale_archive_pointers`, so discovery re-archives the
+//!   complete game and the next prune confirms and deletes.
 //! - **Cache discipline**: the confirm decodes via
 //!   `archive::decode_archive_object` directly and never touches the
 //!   `ArchiveReader` cache (routing 2000 cold games/hour through
@@ -61,7 +70,7 @@ use cja::jobs::Job as _;
 /// Prune-eligible games per hourly discovery run (~3.6x Play-scale
 /// steady-state need; 2000/h drains ~100k backlog in ~2 days). Also the
 /// drain-rate lever: lower it if the hourly backup burst plus prunes
-/// overcommit the shared slot.
+/// overcommit the shared "archive" budget.
 const PRUNE_DISCOVERY_CAP: i64 = 2_000;
 
 /// Job priority for [`crate::jobs::PruneGameTurnsJob`] — BELOW
@@ -136,32 +145,52 @@ async fn run_discovery_with_cap(app_state: &AppState, days: i32, cap: i64) -> cj
     Ok(())
 }
 
-/// Job-facing entry: configured retention, default lock timeout; any Ok
-/// outcome maps to Ok(()) — the job retries only on Err; Skipped/Retained
-/// are decided outcomes, not failures. The outcome enum is for tests and
-/// observability.
+/// Test/direct-call entry: configured retention, default lock timeout;
+/// no shared-budget serialization (the worker path goes through
+/// `PruneGameTurnsJob::run_with_cancellation`, which passes the
+/// attempt's tracked slot). Any Ok outcome maps to Ok(()) — the job
+/// retries only on Err; Skipped/Retained are decided outcomes, not
+/// failures. The outcome enum is for tests and observability.
 pub(crate) async fn prune_game_turns(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
+    prune_game_turns_with_slot(app_state, game_id, cja::jobs::ConcurrencySlot::untracked())
+        .await
+        .map(|_| ())
+}
+
+/// The worker path: `slot` is the attempt's handle on the shared
+/// "archive" budget (see `jobs.rs`, DEV-2432).
+pub(crate) async fn prune_game_turns_with_slot(
+    app_state: &AppState,
+    game_id: Uuid,
+    slot: cja::jobs::ConcurrencySlot,
+) -> cja::Result<PruneOutcome> {
     prune_game_turns_with_lock_timeout(
         app_state,
         game_id,
         app_state.config.turn_retention_days,
         "5s",
+        slot,
     )
     .await
-    .map(|_| ())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PruneOutcome {
     /// Turns deleted and turns_pruned_at committed.
     Pruned { turns_deleted: u64 },
-    /// Failed the eligibility re-check under the slot: already pruned
+    /// Failed the eligibility re-check inside the attempt: already pruned
     /// (duplicate job), not terminal-native, too young, no object path,
     /// or backfill cursor behind. A decided no-op — logged at debug.
     Skipped,
     /// Turns retained on purpose (fail-closed) — see RetainReason.
     /// Always logged at ERROR.
     Retained { reason: RetainReason },
+    /// Turns retained; the archive object held a strict prefix of the
+    /// DB's frames (stale archive — the sweeper race), so archive
+    /// pointers were cleared via a guarded UPDATE and native backup
+    /// discovery will re-archive the complete game. Logged at WARN.
+    /// Not a failure.
+    StaleArchiveCleared,
 }
 
 /// Why turns were retained (log discrimination + test assertions).
@@ -176,7 +205,11 @@ pub(crate) enum RetainReason {
     /// Self-declared game_id != games.game_id.
     WrongGameId,
     /// Frame count differs from turns (stale/incomplete archive — e.g.
-    /// the sweeper race).
+    /// the sweeper race). When the DB holds MORE frames than the
+    /// object, the confirm first proves the object is a strict PREFIX
+    /// of the DB frames (divergence surfaces as FrameContentMismatch,
+    /// a parse failure as Undecodable); only a proven prefix reaches
+    /// this reason, which is what the prune's auto-clear keys on.
     FrameCountMismatch,
     /// Frame content differs from turns at equal count.
     FrameContentMismatch,
@@ -188,6 +221,12 @@ enum PruneConfirm {
     Confirmed,
     /// Retain turns and log loudly. `reason` is the test-facing
     /// discriminator; `detail` is the specifics for the ERROR log line.
+    /// Prefix semantics (DEV-2178): `FrameCountMismatch` with
+    /// `db_frames > archived_frames` means the archive was PROVEN a
+    /// strict prefix of the DB frames — the caller's auto-clear depends
+    /// on that guarantee; a divergent prefix surfaces as
+    /// `FrameContentMismatch` and an unparseable one as `Undecodable`,
+    /// both fail-closed.
     Mismatch {
         reason: RetainReason,
         detail: String,
@@ -199,7 +238,7 @@ enum PruneConfirm {
 /// Pre-delete archive confirmation (DEV-1981): decode the object and
 /// require it to hold EXACTLY what `turns` holds now — version 2, this
 /// game's id, frame-for-frame equal. Pure CPU, called inside
-/// `spawn_blocking` under the backup slot; decodes via
+/// `spawn_blocking` under the shared "archive" budget; decodes via
 /// `archive::decode_archive_object` directly, never through
 /// `ArchiveReader::load` (which would pollute the replay cache). Frames
 /// are compared pairwise as `serde_json::Value`, one pair at a time, so
@@ -247,7 +286,58 @@ fn confirm_archive_content(game_id: Uuid, compressed: &[u8], db_texts: &[String]
             archived.frame_count(),
         );
     }
+    // DEV-2178: shared per-pair comparison — parse one raw archived frame
+    // and one DB frame text as Value and compare. Err carries the
+    // retain reason plus its log detail, so the equal-count loop and the
+    // stale-archive prefix check share parse-error (Undecodable) and
+    // divergence (FrameContentMismatch) semantics without duplication.
+    let frame_pair_equal =
+        |raw: &serde_json::value::RawValue, text: &str| -> Result<bool, (RetainReason, String)> {
+            let archived_frame: serde_json::Value = match serde_json::from_str(raw.get()) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err((
+                        RetainReason::Undecodable,
+                        format!("archived frame does not parse: {e}"),
+                    ));
+                }
+            };
+            let db_frame: serde_json::Value = match serde_json::from_str(text) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err((
+                        RetainReason::Undecodable,
+                        format!("turns frame does not parse: {e}"),
+                    ));
+                }
+            };
+            Ok(archived_frame == db_frame)
+        };
     if archived.frame_count() != db_texts.len() {
+        // DEV-2178: a count mismatch where the DB holds more frames is
+        // only safe to self-heal if the archive is a strict PREFIX of
+        // the DB frames. Divergence (or a parse failure) is
+        // FrameContentMismatch/Undecodable — fail-closed; the caller's
+        // auto-clear never fires on it. The reverse direction (archive
+        // longer than DB) stays FrameCountMismatch, also fail-closed.
+        if archived.frame_count() < db_texts.len() {
+            for (raw, text) in archived.frames().iter().zip(db_texts.iter()) {
+                match frame_pair_equal(raw, text) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return mismatch(
+                            RetainReason::FrameContentMismatch,
+                            "frame content differs from turns (archive prefix diverges)"
+                                .to_string(),
+                            archived.frame_count(),
+                        );
+                    }
+                    Err((reason, detail)) => {
+                        return mismatch(reason, detail, archived.frame_count());
+                    }
+                }
+            }
+        }
         return mismatch(
             RetainReason::FrameCountMismatch,
             "frame count differs from turns (stale or incomplete archive)".to_string(),
@@ -255,44 +345,29 @@ fn confirm_archive_content(game_id: Uuid, compressed: &[u8], db_texts: &[String]
         );
     }
     for (raw, text) in archived.frames().iter().zip(db_texts.iter()) {
-        let archived_frame: serde_json::Value = match serde_json::from_str(raw.get()) {
-            Ok(v) => v,
-            Err(e) => {
+        match frame_pair_equal(raw, text) {
+            Ok(true) => {}
+            Ok(false) => {
                 return mismatch(
-                    RetainReason::Undecodable,
-                    format!("archived frame does not parse: {e}"),
+                    RetainReason::FrameContentMismatch,
+                    "frame content differs from turns".to_string(),
                     archived.frame_count(),
                 );
             }
-        };
-        let db_frame: serde_json::Value = match serde_json::from_str(text) {
-            Ok(v) => v,
-            Err(e) => {
-                return mismatch(
-                    RetainReason::Undecodable,
-                    format!("turns frame does not parse: {e}"),
-                    archived.frame_count(),
-                );
-            }
-        };
-        if archived_frame != db_frame {
-            return mismatch(
-                RetainReason::FrameContentMismatch,
-                "frame content differs from turns".to_string(),
-                archived.frame_count(),
-            );
+            Err((reason, detail)) => return mismatch(reason, detail, archived.frame_count()),
         }
     }
     PruneConfirm::Confirmed
 }
 
 /// Whether `turns_pruned_at` is already set for this game — the
-/// cross-instance duplicate signal. `BACKUP_SLOT` is per-process, so
-/// another instance's prune can commit between this job's under-slot
-/// re-check and its frame fetch, leaving 0 DB frames against the object's
-/// N. Called only for a 0-frame count mismatch: a single-SELECT snapshot
-/// means rows vanish all-or-nothing, so that count is exactly the
-/// signature; the winner's committed marker settles it.
+/// cross-instance duplicate signal. The shared "archive" key is
+/// per-process, so another instance's prune can commit between this
+/// job's in-attempt re-check and its frame fetch, leaving 0 DB frames
+/// against the object's N. Called only for a 0-frame count mismatch: a
+/// single-SELECT snapshot means rows vanish all-or-nothing, so that
+/// count is exactly the signature; the winner's committed marker
+/// settles it.
 async fn pruned_elsewhere(db: &sqlx::PgPool, game_id: Uuid) -> cja::Result<bool> {
     let marker = sqlx::query_scalar!(
         r#"SELECT turns_pruned_at AS "pruned!" FROM games
@@ -305,20 +380,50 @@ async fn pruned_elsewhere(db: &sqlx::PgPool, game_id: Uuid) -> cja::Result<bool>
     Ok(marker.is_some())
 }
 
+/// Clear a stale archive's pointers so native backup discovery
+/// re-archives the game (the GCS key is deterministic, so the
+/// re-archive overwrites the stale object). Guarded: `archived_at`
+/// must equal the value this job read inside the attempt (a concurrent
+/// re-archive stamps a fresh one and wins), and `turns_pruned_at`
+/// must still be NULL (never strip a pruned game's pointers — the
+/// `games_pruned_requires_archive_check` CHECK also enforces this).
+/// The UPDATE bumps `updated_at` (trigger), which is what makes the
+/// row hit discovery's recent tier within the hour.
+async fn clear_stale_archive_pointers(
+    db: &sqlx::PgPool,
+    game_id: Uuid,
+    archived_at_read: chrono::DateTime<chrono::Utc>,
+) -> cja::Result<u64> {
+    let result = sqlx::query!(
+        r#"UPDATE games
+           SET archived_at = NULL, gcs_path = NULL, archive_version = NULL
+           WHERE game_id = $1
+             AND archived_at = $2
+             AND turns_pruned_at IS NULL"#,
+        game_id,
+        archived_at_read
+    )
+    .execute(db)
+    .await
+    .wrap_err("Failed to clear stale archive pointers")?;
+    Ok(result.rows_affected())
+}
+
 /// Prune one archived native game's `turns` rows (its `snake_turns`
 /// cascade via the FK) after confirming the archive object's content.
 ///
-/// Ordering is `archive_native_game`'s (`native_backup.rs`): slot FIRST,
-/// predicate re-check UNDER the slot. The under-slot re-check is the
-/// in-instance dedup — a duplicate job serializes on the slot, sees the
-/// winner's committed `turns_pruned_at`, and returns `Skipped` before any
-/// GET, instead of comparing 0 DB frames against the object's N frames
-/// and logging a false data-loss ERROR. The slot is per-process, so a
-/// duplicate racing a DIFFERENT instance's prune is caught after the
-/// confirm instead: a 0-frame count mismatch re-reads `turns_pruned_at`
-/// and skips silently when the other instance already committed. The
-/// permit rides into the confirm's `spawn_blocking` and back out, so a
-/// dropped future cannot free the slot while the CPU work runs.
+/// Ordering is `archive_native_game`'s (`native_backup.rs`): predicate
+/// re-check INSIDE the attempt. The in-attempt re-check is the
+/// in-instance dedup — a duplicate job serializes on the shared
+/// "archive" budget, sees the winner's committed `turns_pruned_at`, and
+/// returns `Skipped` before any GET, instead of comparing 0 DB frames
+/// against the object's N frames and logging a false data-loss ERROR.
+/// The key is per-process, so a duplicate racing a DIFFERENT instance's
+/// prune is caught after the confirm instead: a 0-frame count mismatch
+/// re-reads `turns_pruned_at` and skips silently when the other instance
+/// already committed. The slot MOVES into the confirm's `spawn_blocking`
+/// closure, so a dropped future cannot free the budget while the CPU
+/// work runs (arena#221).
 ///
 /// Never deletes without a content-confirmed object (fail-closed: the
 /// turns are the only complete copy otherwise). The delete and the
@@ -329,21 +434,26 @@ async fn prune_game_turns_with_lock_timeout(
     game_id: Uuid,
     days: i32,
     lock_timeout: &str,
+    slot: cja::jobs::ConcurrencySlot,
 ) -> cja::Result<PruneOutcome> {
-    // 1. Slot FIRST — before the predicate re-check (dedup: a duplicate
-    //    serializes here and sees the winner's committed turns_pruned_at;
-    //    memory: only the slot holder holds frames; drain safety: the
-    //    permit rides into spawn_blocking and back out).
-    let permit = std::sync::Arc::clone(&crate::backup::BACKUP_SLOT)
-        .acquire_owned()
-        .await
-        .wrap_err("Backup slot semaphore closed")?;
+    prune_body(app_state, game_id, days, lock_timeout, slot).await
+}
 
-    // 2. Re-check the full prune predicate for this one game, UNDER the
-    //    slot. gcs_path is non-NULL by the predicate, so "!" is safe.
-    let Some(gcs_path) = sqlx::query_scalar!(
+/// The body of [`prune_game_turns_with_lock_timeout`].
+async fn prune_body(
+    app_state: &AppState,
+    game_id: Uuid,
+    days: i32,
+    lock_timeout: &str,
+    slot: cja::jobs::ConcurrencySlot,
+) -> cja::Result<PruneOutcome> {
+    // Re-check the full prune predicate for this one game, INSIDE the
+    // attempt (dedup: a duplicate sees the winner's committed
+    // turns_pruned_at; memory: only the budget holder holds frames; drain
+    // safety: the slot rides into spawn_blocking).
+    let Some(row) = sqlx::query!(
         r#"
-        SELECT gcs_path AS "gcs_path!"
+        SELECT gcs_path AS "gcs_path!", archived_at AS "archived_at!"
         FROM games
         WHERE game_id = $1
           AND engine_game_id IS NULL
@@ -373,12 +483,17 @@ async fn prune_game_turns_with_lock_timeout(
              terminal-native, too young, no object path, or cursor behind)");
         return Ok(PruneOutcome::Skipped);
     };
+    let gcs_path = row.gcs_path;
+    // The `archived_at` this job read inside the attempt — the guard value
+    // for the stale-archive pointer clear below (a concurrent
+    // re-archive stamps a fresh one and wins the race).
+    let archived_at_read = row.archived_at;
 
     // 3. What the archiver would write NOW, then the stored object.
     //    fetch_native_frame_texts is the writer's own selection, so the
     //    writer's and confirmer's frame selections can never drift.
     let db_texts = crate::native_backup::fetch_native_frame_texts(&app_state.db, game_id).await?;
-    // A hung GET must not pin the backup slot: 10s cap, same as the
+    // A hung GET must not pin the archive budget: 10s cap, same as the
     // reader's fetch timeout. Timeout/storage error => Err => job retry.
     let compressed = tokio::time::timeout(
         std::time::Duration::from_secs(10),
@@ -394,11 +509,11 @@ async fn prune_game_turns_with_lock_timeout(
         }); // never delete; hourly discovery re-logs this
     };
 
-    // 4. Confirm content on the blocking pool; permit rides INTO the
-    //    closure and back OUT.
-    let (permit, verdict) = tokio::task::spawn_blocking(move || {
-        let verdict = confirm_archive_content(game_id, &compressed, &db_texts);
-        (permit, verdict)
+    // Confirm content on the blocking pool; the slot MOVES into the
+    // closure (arena#221: named binding, first statement).
+    let verdict = tokio::task::spawn_blocking(move || {
+        let _held = slot;
+        confirm_archive_content(game_id, &compressed, &db_texts)
     })
     .await
     .wrap_err("Prune confirm task panicked")?;
@@ -410,9 +525,9 @@ async fn prune_game_turns_with_lock_timeout(
             archived_frames,
             db_frames,
         } => {
-            // Cross-instance duplicate (PR review r1): `BACKUP_SLOT` is
+            // Cross-instance duplicate (PR review r1): the "archive" key is
             // per-process, so another instance's prune can commit between
-            // this job's under-slot re-check and its frame fetch — this job
+            // this job's in-attempt re-check and its frame fetch — this job
             // then compares 0 DB frames against the object's N and would
             // log the false data-loss ERROR. `fetch_native_frame_texts`
             // is a single SELECT (one snapshot), so rows vanish
@@ -427,6 +542,25 @@ async fn prune_game_turns_with_lock_timeout(
                 tracing::debug!(%game_id,
                     "Prune skipped: another instance pruned this game between \
                      the re-check and the frame fetch");
+                return Ok(PruneOutcome::Skipped);
+            }
+            // DEV-2178: the DB is a superset of the archive and the confirm
+            // proved the archive is a strict prefix (sweeper race: archived
+            // mid-run, straggler turns after). The stale object blocks
+            // pruning forever; clear the pointers so discovery re-archives
+            // the complete game, then a later prune confirms and deletes.
+            // Only this direction: an archive holding MORE frames than the
+            // DB, or a divergent prefix, stays fail-closed above.
+            if reason == RetainReason::FrameCountMismatch && db_frames > archived_frames {
+                let cleared =
+                    clear_stale_archive_pointers(&app_state.db, game_id, archived_at_read).await?;
+                if cleared == 1 {
+                    tracing::warn!(%game_id, path = %gcs_path, archived_frames, db_frames,
+                        "Stale archive (DB has more frames); cleared pointers for re-archival");
+                    return Ok(PruneOutcome::StaleArchiveCleared);
+                }
+                tracing::debug!(%game_id,
+                    "Concurrent re-archive won the race; leaving archive pointers alone");
                 return Ok(PruneOutcome::Skipped);
             }
             tracing::error!(
@@ -468,7 +602,6 @@ async fn prune_game_turns_with_lock_timeout(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    drop(permit);
 
     let turns_deleted = deleted.rows_affected();
     tracing::info!(%game_id, turns_deleted, "Pruned game turns");
@@ -512,8 +645,8 @@ mod tests {
     ) -> cja::Result<Uuid> {
         let login = format!("prune-user-{}", Uuid::new_v4().simple());
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(Uuid::new_v4().as_u128() as i64)
         .bind(&login)
@@ -611,6 +744,24 @@ mod tests {
             .fetch_one(pool)
             .await?;
         Ok(value)
+    }
+
+    /// The game's archive pointer columns.
+    async fn archive_pointers(
+        pool: &sqlx::PgPool,
+        game_id: Uuid,
+    ) -> cja::Result<(
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<String>,
+        Option<i32>,
+    )> {
+        let row = sqlx::query_as(
+            "SELECT archived_at, gcs_path, archive_version FROM games WHERE game_id = $1",
+        )
+        .bind(game_id)
+        .fetch_one(pool)
+        .await?;
+        Ok(row)
     }
 
     /// The shared fixture: an archived old native game with framed turns +
@@ -725,7 +876,14 @@ mod tests {
         assert_eq!(turn_count(&pool, game_id).await?, 3);
         assert_eq!(snake_turn_count(&pool, game_id).await?, 3);
 
-        let outcome = prune_game_turns_with_lock_timeout(&state, game_id, 30, "5s").await?;
+        let outcome = prune_game_turns_with_lock_timeout(
+            &state,
+            game_id,
+            30,
+            "5s",
+            cja::jobs::ConcurrencySlot::untracked(),
+        )
+        .await?;
         assert_eq!(outcome, PruneOutcome::Pruned { turns_deleted: 3 });
 
         assert_eq!(turn_count(&pool, game_id).await?, 0);
@@ -820,7 +978,14 @@ mod tests {
 
         for game_id in [young, unarchived, imported, running, pathless] {
             assert_eq!(
-                prune_game_turns_with_lock_timeout(&state, game_id, 30, "5s").await?,
+                prune_game_turns_with_lock_timeout(
+                    &state,
+                    game_id,
+                    30,
+                    "5s",
+                    cja::jobs::ConcurrencySlot::untracked(),
+                )
+                .await?,
                 PruneOutcome::Skipped,
                 "game {game_id} must skip"
             );
@@ -856,7 +1021,14 @@ mod tests {
         .execute(&pool)
         .await?;
 
-        let outcome = prune_game_turns_with_lock_timeout(&state, game_id, 30, "5s").await?;
+        let outcome = prune_game_turns_with_lock_timeout(
+            &state,
+            game_id,
+            30,
+            "5s",
+            cja::jobs::ConcurrencySlot::untracked(),
+        )
+        .await?;
         assert_eq!(
             outcome,
             PruneOutcome::Retained {
@@ -868,25 +1040,285 @@ mod tests {
         Ok(())
     }
 
-    /// SC: the sweeper race (game archived mid-run, more turns written
-    /// after) leaves a stale object — the count mismatch retains ALL
-    /// turns, including the new one.
+    /// SC (DEV-2178): the sweeper race (game archived mid-run, more turns
+    /// written after) leaves a stale object holding a strict prefix — the
+    /// prune auto-clears the archive pointers (discovery will re-archive
+    /// the complete game) and retains ALL turns, including the new one.
     #[sqlx::test(migrations = "../migrations")]
-    async fn prune_retains_turns_on_frame_count_mismatch(pool: PgPool) -> cja::Result<()> {
+    async fn prune_clears_stale_archive_pointers_when_db_has_more_frames(
+        pool: PgPool,
+    ) -> cja::Result<()> {
         let state = AppState::test_from_pool(pool.clone());
         let (game_id, gb) = archived_old_native_game(&state, 40, 2).await?;
         // The straggler turn lands after the archive was written.
         fixture_turn(&pool, game_id, 2, frame(2, &gb.to_string())).await?;
 
-        let outcome = prune_game_turns_with_lock_timeout(&state, game_id, 30, "5s").await?;
+        let outcome = prune_game_turns_with_lock_timeout(
+            &state,
+            game_id,
+            30,
+            "5s",
+            cja::jobs::ConcurrencySlot::untracked(),
+        )
+        .await?;
+        assert_eq!(outcome, PruneOutcome::StaleArchiveCleared);
+        assert_eq!(turn_count(&pool, game_id).await?, 3, "no turn is deleted");
+        assert!(turns_pruned_at(&pool, game_id).await?.is_none());
+        let (archived_at, gcs_path, archive_version) = archive_pointers(&pool, game_id).await?;
+        assert!(archived_at.is_none(), "stale archive pointers cleared");
+        assert!(gcs_path.is_none());
+        assert!(archive_version.is_none());
+        Ok(())
+    }
+
+    /// SC (DEV-2178): the full self-heal loop — stale archive auto-clears
+    /// the pointers, the real archiver re-archives the complete game, and
+    /// the next prune confirms and deletes.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn stale_archive_rearchives_then_prunes(pool: PgPool) -> cja::Result<()> {
+        let state = AppState::test_from_pool(pool.clone());
+        let (game_id, gb) = archived_old_native_game(&state, 40, 2).await?;
+        fixture_turn(&pool, game_id, 2, frame(2, &gb.to_string())).await?;
+
+        // Prune 1: stale archive → pointers cleared, turns retained.
+        let outcome = prune_game_turns_with_lock_timeout(
+            &state,
+            game_id,
+            30,
+            "5s",
+            cja::jobs::ConcurrencySlot::untracked(),
+        )
+        .await?;
+        assert_eq!(outcome, PruneOutcome::StaleArchiveCleared);
+        assert_eq!(turn_count(&pool, game_id).await?, 3);
+        assert!(turns_pruned_at(&pool, game_id).await?.is_none());
+
+        // Re-archive (discovery's job, run inline): the COMPLETE game.
+        crate::native_backup::archive_native_game(&state, game_id).await?;
+        let (archived_at, gcs_path, archive_version) = archive_pointers(&pool, game_id).await?;
+        assert!(archived_at.is_some(), "game re-archived");
+        assert_eq!(archive_version, Some(2));
+        let gcs_path = gcs_path.expect("re-archive records gcs_path");
+        let bytes = state
+            .object_store
+            .get(&gcs_path)
+            .await?
+            .expect("re-archived object exists");
+        let json = zstd::decode_all(bytes.as_slice())?;
+        let export: serde_json::Value = serde_json::from_slice(&json)?;
+        assert_eq!(
+            export["frames"].as_array().expect("frames array").len(),
+            3,
+            "re-archived object holds every frame"
+        );
+
+        // Prune 2: confirms the complete archive and deletes.
+        let outcome = prune_game_turns_with_lock_timeout(
+            &state,
+            game_id,
+            30,
+            "5s",
+            cja::jobs::ConcurrencySlot::untracked(),
+        )
+        .await?;
+        assert_eq!(outcome, PruneOutcome::Pruned { turns_deleted: 3 });
+        assert_eq!(turn_count(&pool, game_id).await?, 0);
+        assert!(turns_pruned_at(&pool, game_id).await?.is_some());
+        Ok(())
+    }
+
+    /// SC (DEV-2178): fail-closed direction — an archive holding MORE
+    /// frames than the DB is NOT a stale prefix and never auto-clears.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn prune_retains_when_archive_has_more_frames_than_db(pool: PgPool) -> cja::Result<()> {
+        let state = AppState::test_from_pool(pool.clone());
+        let (game_id, _gb) = archived_old_native_game(&state, 40, 3).await?;
+        // The DB loses a frame: archive (3) > DB (2).
+        sqlx::query("DELETE FROM turns WHERE game_id = $1 AND turn_number = 2")
+            .bind(game_id)
+            .execute(&pool)
+            .await?;
+
+        let outcome = prune_game_turns_with_lock_timeout(
+            &state,
+            game_id,
+            30,
+            "5s",
+            cja::jobs::ConcurrencySlot::untracked(),
+        )
+        .await?;
         assert_eq!(
             outcome,
             PruneOutcome::Retained {
                 reason: RetainReason::FrameCountMismatch
             }
         );
-        assert_eq!(turn_count(&pool, game_id).await?, 3, "no turn is deleted");
+        assert_eq!(turn_count(&pool, game_id).await?, 2);
         assert!(turns_pruned_at(&pool, game_id).await?.is_none());
+        let (archived_at, gcs_path, _) = archive_pointers(&pool, game_id).await?;
+        assert!(
+            archived_at.is_some(),
+            "archive pointers stay set (fail-closed)"
+        );
+        assert!(gcs_path.is_some());
+        Ok(())
+    }
+
+    /// SC (DEV-2178): a count mismatch whose prefix DIVERGES surfaces as
+    /// FrameContentMismatch — the auto-clear never fires on it.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn prune_retains_when_archive_prefix_diverges(pool: PgPool) -> cja::Result<()> {
+        let state = AppState::test_from_pool(pool.clone());
+        let (game_id, gb) = archived_old_native_game(&state, 40, 2).await?;
+        rewrite_object(&state, game_id, &|object| {
+            object["frames"][0]["Turn"] = serde_json::json!(99);
+        })
+        .await?;
+        // The straggler makes DB (3) > archive (2) — but the archive's
+        // prefix no longer matches the DB.
+        fixture_turn(&pool, game_id, 2, frame(2, &gb.to_string())).await?;
+
+        let outcome = prune_game_turns_with_lock_timeout(
+            &state,
+            game_id,
+            30,
+            "5s",
+            cja::jobs::ConcurrencySlot::untracked(),
+        )
+        .await?;
+        assert_eq!(
+            outcome,
+            PruneOutcome::Retained {
+                reason: RetainReason::FrameContentMismatch
+            }
+        );
+        assert_eq!(turn_count(&pool, game_id).await?, 3);
+        assert!(turns_pruned_at(&pool, game_id).await?.is_none());
+        let (archived_at, gcs_path, _) = archive_pointers(&pool, game_id).await?;
+        assert!(
+            archived_at.is_some(),
+            "archive pointers stay set (fail-closed)"
+        );
+        assert!(gcs_path.is_some());
+        Ok(())
+    }
+
+    /// SC (DEV-2178): the pointer-clear's guards — only the exact
+    /// `archived_at` this job read clears (a concurrent re-archive wins),
+    /// and never a pruned game (the helper's own
+    /// `turns_pruned_at IS NULL` WHERE guard).
+    #[sqlx::test(migrations = "../migrations")]
+    async fn clear_stale_archive_pointers_guards(pool: PgPool) -> cja::Result<()> {
+        let old = chrono::Utc::now() - chrono::Duration::days(40);
+        let game_id = fixture_game(&pool, "finished", old, None).await?;
+        async fn read_archived_at(
+            pool: &sqlx::PgPool,
+            game_id: Uuid,
+        ) -> cja::Result<chrono::DateTime<chrono::Utc>> {
+            Ok(
+                sqlx::query_scalar("SELECT archived_at FROM games WHERE game_id = $1")
+                    .bind(game_id)
+                    .fetch_one(pool)
+                    .await?,
+            )
+        }
+        let set_pointers = "UPDATE games SET archived_at = NOW(), gcs_path = 'native/2026/11/07/x.json.zst', archive_version = 2 WHERE game_id = $1";
+
+        // (a) matching archived_at → 1 row, pointers cleared.
+        sqlx::query(set_pointers)
+            .bind(game_id)
+            .execute(&pool)
+            .await?;
+        let read = read_archived_at(&pool, game_id).await?;
+        assert_eq!(clear_stale_archive_pointers(&pool, game_id, read).await?, 1);
+        let (archived_at, gcs_path, archive_version) = archive_pointers(&pool, game_id).await?;
+        assert!(archived_at.is_none());
+        assert!(gcs_path.is_none());
+        assert!(archive_version.is_none());
+
+        // (b) different archived_at (concurrent re-archive stamped a fresh
+        // one) → 0 rows, pointers intact.
+        sqlx::query(set_pointers)
+            .bind(game_id)
+            .execute(&pool)
+            .await?;
+        let read = read_archived_at(&pool, game_id).await?;
+        let stale = read - chrono::Duration::seconds(1);
+        assert_eq!(
+            clear_stale_archive_pointers(&pool, game_id, stale).await?,
+            0
+        );
+        let (archived_at, gcs_path, _) = archive_pointers(&pool, game_id).await?;
+        assert!(archived_at.is_some(), "race loser must not clear pointers");
+        assert!(gcs_path.is_some());
+
+        // (c) pruned game → 0 rows even with a matching archived_at (the
+        // query's own turns_pruned_at IS NULL guard).
+        sqlx::query(
+            "UPDATE games SET turns_pruned_at = NOW(), archived_at = NOW(),
+             gcs_path = 'native/2026/11/07/x.json.zst', archive_version = 2
+             WHERE game_id = $1",
+        )
+        .bind(game_id)
+        .execute(&pool)
+        .await?;
+        let read = read_archived_at(&pool, game_id).await?;
+        assert_eq!(clear_stale_archive_pointers(&pool, game_id, read).await?, 0);
+        let (archived_at, gcs_path, _) = archive_pointers(&pool, game_id).await?;
+        assert!(archived_at.is_some(), "pruned game keeps its pointers");
+        assert!(gcs_path.is_some());
+        Ok(())
+    }
+
+    /// SC (DEV-2178): the `games` CHECK rejects clearing archive pointers
+    /// on a pruned game — raw SQL and the gap-#1 writer
+    /// (`mark_game_finished_tx` on a pruned failed-era game) both.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn check_constraint_rejects_clearing_pointers_on_pruned_game(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let old = chrono::Utc::now() - chrono::Duration::days(40);
+        let game_id = fixture_game(&pool, "failed", old, None).await?;
+        // Valid: pruned WITH pointers.
+        sqlx::query(
+            "UPDATE games SET turns_pruned_at = NOW(), archived_at = NOW(),
+             gcs_path = 'native/2026/11/07/x.json.zst', archive_version = 2
+             WHERE game_id = $1",
+        )
+        .bind(game_id)
+        .execute(&pool)
+        .await?;
+
+        // Raw pointer clear: rejected by the CHECK.
+        let err = sqlx::query(
+            "UPDATE games SET archived_at = NULL, gcs_path = NULL, archive_version = NULL
+             WHERE game_id = $1",
+        )
+        .bind(game_id)
+        .execute(&pool)
+        .await
+        .expect_err("CHECK must reject clearing pointers on a pruned game");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("games_pruned_requires_archive_check"),
+            "error must name the constraint, got: {msg}"
+        );
+
+        // The gap-#1 writer: mark_game_finished_tx passes its
+        // status guard on a 'failed' pruned game and would clear the
+        // pointers — the CHECK is the backstop. `{:#}` is required:
+        // the sqlx error is wrapped, so `{}` would drop the constraint
+        // name from the chain.
+        let mut tx = pool.begin().await?;
+        let err = crate::models::game::mark_game_finished_tx(&mut tx, game_id, chrono::Utc::now())
+            .await
+            .expect_err("mark_game_finished_tx must be rejected on a pruned game");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("games_pruned_requires_archive_check"),
+            "error must name the constraint, got: {msg}"
+        );
+        tx.rollback().await?;
         Ok(())
     }
 
@@ -903,7 +1335,14 @@ mod tests {
         })
         .await?;
 
-        let outcome = prune_game_turns_with_lock_timeout(&state, game_id, 30, "5s").await?;
+        let outcome = prune_game_turns_with_lock_timeout(
+            &state,
+            game_id,
+            30,
+            "5s",
+            cja::jobs::ConcurrencySlot::untracked(),
+        )
+        .await?;
         assert_eq!(
             outcome,
             PruneOutcome::Retained {
@@ -927,7 +1366,14 @@ mod tests {
         })
         .await?;
 
-        let outcome = prune_game_turns_with_lock_timeout(&state, game_id, 30, "5s").await?;
+        let outcome = prune_game_turns_with_lock_timeout(
+            &state,
+            game_id,
+            30,
+            "5s",
+            cja::jobs::ConcurrencySlot::untracked(),
+        )
+        .await?;
         assert_eq!(
             outcome,
             PruneOutcome::Retained {
@@ -948,7 +1394,14 @@ mod tests {
         })
         .await?;
 
-        let outcome = prune_game_turns_with_lock_timeout(&state, game_id, 30, "5s").await?;
+        let outcome = prune_game_turns_with_lock_timeout(
+            &state,
+            game_id,
+            30,
+            "5s",
+            cja::jobs::ConcurrencySlot::untracked(),
+        )
+        .await?;
         assert_eq!(
             outcome,
             PruneOutcome::Retained {
@@ -978,7 +1431,14 @@ mod tests {
         let truncated = genuine[..genuine.len() / 2].to_vec();
         state.object_store.put(&gcs_path, truncated).await?;
 
-        let outcome = prune_game_turns_with_lock_timeout(&state, game_id, 30, "5s").await?;
+        let outcome = prune_game_turns_with_lock_timeout(
+            &state,
+            game_id,
+            30,
+            "5s",
+            cja::jobs::ConcurrencySlot::untracked(),
+        )
+        .await?;
         assert_eq!(
             outcome,
             PruneOutcome::Retained {
@@ -999,17 +1459,38 @@ mod tests {
         let (too_young, _gb2) = archived_old_native_game(&state, 29, 1).await?;
 
         assert_eq!(
-            prune_game_turns_with_lock_timeout(&state, old_enough, 30, "5s").await?,
+            prune_game_turns_with_lock_timeout(
+                &state,
+                old_enough,
+                30,
+                "5s",
+                cja::jobs::ConcurrencySlot::untracked(),
+            )
+            .await?,
             PruneOutcome::Pruned { turns_deleted: 1 }
         );
         assert_eq!(
-            prune_game_turns_with_lock_timeout(&state, too_young, 30, "5s").await?,
+            prune_game_turns_with_lock_timeout(
+                &state,
+                too_young,
+                30,
+                "5s",
+                cja::jobs::ConcurrencySlot::untracked(),
+            )
+            .await?,
             PruneOutcome::Skipped
         );
 
         let (medium, _gb3) = archived_old_native_game(&state, 10, 1).await?;
         assert_eq!(
-            prune_game_turns_with_lock_timeout(&state, medium, 7, "5s").await?,
+            prune_game_turns_with_lock_timeout(
+                &state,
+                medium,
+                7,
+                "5s",
+                cja::jobs::ConcurrencySlot::untracked(),
+            )
+            .await?,
             PruneOutcome::Pruned { turns_deleted: 1 }
         );
         Ok(())
@@ -1041,7 +1522,14 @@ mod tests {
                 .contains(&game_id.to_string())
         );
         assert_eq!(
-            prune_game_turns_with_lock_timeout(&state, game_id, 30, "5s").await?,
+            prune_game_turns_with_lock_timeout(
+                &state,
+                game_id,
+                30,
+                "5s",
+                cja::jobs::ConcurrencySlot::untracked(),
+            )
+            .await?,
             PruneOutcome::Skipped
         );
 
@@ -1049,7 +1537,14 @@ mod tests {
         // older than the whole rescan window → prune proceeds.
         set_cursor(&pool, now - chrono::Duration::days(38)).await?;
         assert_eq!(
-            prune_game_turns_with_lock_timeout(&state, game_id, 30, "5s").await?,
+            prune_game_turns_with_lock_timeout(
+                &state,
+                game_id,
+                30,
+                "5s",
+                cja::jobs::ConcurrencySlot::untracked(),
+            )
+            .await?,
             PruneOutcome::Pruned { turns_deleted: 1 }
         );
         Ok(())
@@ -1106,11 +1601,25 @@ mod tests {
         // the third (the pruned games' existing job rows are not
         // duplicated — one row per game after both runs).
         assert_eq!(
-            prune_game_turns_with_lock_timeout(&state, oldest, 30, "5s").await?,
+            prune_game_turns_with_lock_timeout(
+                &state,
+                oldest,
+                30,
+                "5s",
+                cja::jobs::ConcurrencySlot::untracked(),
+            )
+            .await?,
             PruneOutcome::Pruned { turns_deleted: 1 }
         );
         assert_eq!(
-            prune_game_turns_with_lock_timeout(&state, middle, 30, "5s").await?,
+            prune_game_turns_with_lock_timeout(
+                &state,
+                middle,
+                30,
+                "5s",
+                cja::jobs::ConcurrencySlot::untracked(),
+            )
+            .await?,
             PruneOutcome::Pruned { turns_deleted: 1 }
         );
         run_discovery_with_cap(&state, 30, 2).await?;
@@ -1157,7 +1666,14 @@ mod tests {
 
         let prune_state = state.clone();
         let prune = tokio::spawn(async move {
-            prune_game_turns_with_lock_timeout(&prune_state, game_id, 30, "1s").await
+            prune_game_turns_with_lock_timeout(
+                &prune_state,
+                game_id,
+                30,
+                "1s",
+                cja::jobs::ConcurrencySlot::untracked(),
+            )
+            .await
         });
 
         // Deterministic: wait until the DELETE is actually blocked, then
@@ -1190,63 +1706,61 @@ mod tests {
         // Release and retry: succeeds.
         blocker.rollback().await?;
         assert_eq!(
-            prune_game_turns_with_lock_timeout(&state, game_id, 30, "5s").await?,
+            prune_game_turns_with_lock_timeout(
+                &state,
+                game_id,
+                30,
+                "5s",
+                cja::jobs::ConcurrencySlot::untracked(),
+            )
+            .await?,
             PruneOutcome::Pruned { turns_deleted: 2 }
         );
         Ok(())
     }
 
-    /// SC: duplicate prune jobs are silent no-ops — the loser serializes
-    /// on the slot, sees the winner's committed marker, and Skips (never
-    /// a false data-loss Retained from comparing 0 DB frames against the
-    /// object's N).
+    /// SC (serialized half): a duplicate whose predicate re-check runs
+    /// after the winner's commit is a silent `Skipped` — never a false
+    /// data-loss Retained from comparing 0 DB frames against the
+    /// object's N. Claim-path serialization of duplicates is covered by
+    /// `wedged_archive_key_does_not_starve_game_runners` in `jobs/tests.rs`
+    /// (the shared "archive" key makes the loser's row invisible at
+    /// claim until the winner's attempt finishes); this pins the body's
+    /// re-check semantics with sequential awaits.
     #[sqlx::test(migrations = "../migrations")]
-    async fn duplicate_prune_jobs_are_silent_noops(pool: PgPool) -> cja::Result<()> {
+    async fn prune_after_completed_prune_is_silent_skip(pool: PgPool) -> cja::Result<()> {
         let state = AppState::test_from_pool(pool.clone());
         let (game_id, _gb) = archived_old_native_game(&state, 40, 2).await?;
 
-        // Hold the slot so neither prune can start, spawn both, settle,
-        // then release — the winner prunes, the duplicate no-ops.
-        let permit = std::sync::Arc::clone(&crate::backup::BACKUP_SLOT)
-            .acquire_owned()
-            .await
-            .unwrap();
-        let a = state.clone();
-        let b = state.clone();
-        let prune_a =
-            tokio::spawn(
-                async move { prune_game_turns_with_lock_timeout(&a, game_id, 30, "5s").await },
-            );
-        let prune_b =
-            tokio::spawn(
-                async move { prune_game_turns_with_lock_timeout(&b, game_id, 30, "5s").await },
-            );
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        drop(permit);
+        // The winner prunes to completion …
+        let first = prune_game_turns_with_lock_timeout(
+            &state,
+            game_id,
+            30,
+            "5s",
+            cja::jobs::ConcurrencySlot::untracked(),
+        )
+        .await?;
+        // … then the duplicate's predicate re-check sees the committed
+        // marker and Skips.
+        let second = prune_game_turns_with_lock_timeout(
+            &state,
+            game_id,
+            30,
+            "5s",
+            cja::jobs::ConcurrencySlot::untracked(),
+        )
+        .await?;
 
-        let a = tokio::time::timeout(std::time::Duration::from_secs(30), prune_a).await???;
-        let b = tokio::time::timeout(std::time::Duration::from_secs(30), prune_b).await???;
-        let mut outcomes = vec![a, b];
-        outcomes.sort_by_key(|o| match o {
-            PruneOutcome::Pruned { .. } => 0,
-            PruneOutcome::Skipped => 1,
-            PruneOutcome::Retained { .. } => 2,
-        });
-        assert_eq!(
-            outcomes,
-            vec![
-                PruneOutcome::Pruned { turns_deleted: 2 },
-                PruneOutcome::Skipped
-            ],
-            "never Retained"
-        );
+        assert_eq!(first, PruneOutcome::Pruned { turns_deleted: 2 });
+        assert_eq!(second, PruneOutcome::Skipped, "never Retained");
         assert_eq!(turn_count(&pool, game_id).await?, 0);
         assert!(turns_pruned_at(&pool, game_id).await?.is_some());
         Ok(())
     }
 
-    /// PR review r1: `BACKUP_SLOT` is per-process, so a duplicate racing
-    /// ANOTHER instance's prune slips past the under-slot re-check and
+    /// PR review r1: the shared "archive" key is per-process, so a duplicate racing
+    /// ANOTHER instance's prune slips past the in-attempt re-check and
     /// surfaces as a 0-frame count mismatch; the `pruned_elsewhere`
     /// marker re-read is what keeps that case a silent Skipped. The full
     /// interleaving needs two processes — this pins the re-read itself:
@@ -1258,10 +1772,16 @@ mod tests {
     ) -> cja::Result<()> {
         let old = chrono::Utc::now() - chrono::Duration::days(40);
         let winner = fixture_game(&pool, "finished", old, None).await?;
-        sqlx::query("UPDATE games SET turns_pruned_at = NOW() WHERE game_id = $1")
-            .bind(winner)
-            .execute(&pool)
-            .await?;
+        // One statement: mark pruned WITH pointers (a bare
+        // turns_pruned_at mark now violates games_pruned_requires_archive_check).
+        sqlx::query(
+            "UPDATE games SET turns_pruned_at = NOW(), archived_at = NOW(),
+             gcs_path = 'native/2026/11/07/x.json.zst', archive_version = 2
+             WHERE game_id = $1",
+        )
+        .bind(winner)
+        .execute(&pool)
+        .await?;
         let stale = fixture_game(&pool, "finished", old, None).await?;
 
         assert!(pruned_elsewhere(&pool, winner).await?);

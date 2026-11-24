@@ -1,12 +1,34 @@
 use crate::state::AppState;
 
-use cja::jobs::Job;
+use cja::jobs::{Concurrency, ConcurrencySlot, Job};
 use color_eyre::eyre::Context as _;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroUsize;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::notifications::{NotificationChannel, NotificationKind};
 use crate::play_shutdown_notices::PlayShutdownNoticeJob;
+
+/// The shared budget name: one archive operation at a time per process,
+/// across ALL FOUR archive job types (`BackupSingleGameJob`,
+/// `NativeBackupSingleGameJob`, `PruneGameTurnsJob`,
+/// `DroppedFieldsRepairGameJob`) via cja's `Concurrency::PerProcessShared`
+/// (cja #97 / DEV-2431, adopted here in DEV-2432). The wait happens at
+/// claim — while the key is saturated, every archive row is invisible to
+/// the claim query, so a wedged holder parks ZERO workers. All four types
+/// MUST reference this same const: cja fails worker startup on
+/// conflicting limits for one key, but same-limit-different-key is silent.
+const BACKUP_ARCHIVE_KEY: &str = "archive";
+const BACKUP_ARCHIVE_CONCURRENCY: Concurrency = Concurrency::PerProcessShared {
+    key: BACKUP_ARCHIVE_KEY,
+    limit: NonZeroUsize::MIN,
+};
+/// Hold-time bound for one archive attempt (was `BACKUP_SLOT_HOLD_LIMIT`,
+/// the 2026-11-16 incident-fix wedge bound). The wait no longer counts:
+/// it happens at claim, outside the attempt.
+const BACKUP_ARCHIVE_MAX_RUNTIME: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SendNotificationEmailJob {
@@ -23,7 +45,7 @@ impl Job<AppState> for SendNotificationEmailJob {
             messages::{self, EmailContent},
         };
         use crate::models::{
-            claim_email_token, leaderboard_entry_health, notification, notification_email,
+            claim_email_token, leaderboard_registration, notification, notification_email,
         };
 
         let _permit = state.mailer.acquire_delivery_permit().await?;
@@ -70,7 +92,7 @@ impl Job<AppState> for SendNotificationEmailJob {
                 recipient = if email.recipient_user {
                     notification_email::resolved_recipient(&mut tx, event.user_id).await?
                 } else if let Some(snake_id) = email.battlesnake_id {
-                    leaderboard_entry_health::owner_notification_email(&mut tx, snake_id).await?
+                    leaderboard_registration::owner_notification_email(&mut tx, snake_id).await?
                 } else {
                     None // Legacy override-only toggleable rows cannot bypass confirmation.
                 };
@@ -166,7 +188,7 @@ impl Job<AppState> for SendNotificationEmailJob {
                 let outcome = state
                     .mailer
                     .send_limited(
-                        &mut tx,
+                        &state.db,
                         state.config.email_per_recipient_hourly_limit,
                         kind.key(),
                         &message,
@@ -177,7 +199,7 @@ impl Job<AppState> for SendNotificationEmailJob {
                         SendOutcome::Sent => {
                             sqlx::query!("UPDATE notification_email_requests SET sent_at = NOW() WHERE request_id = $1", request_id).execute(&mut *tx).await?;
                         }
-                        SendOutcome::RateLimited | SendOutcome::Disabled => {
+                        SendOutcome::RateLimited | SendOutcome::Disabled | SendOutcome::Failed => {
                             sqlx::query!("UPDATE notification_email_requests SET token_hash = NULL, expires_at = NULL WHERE request_id = $1", request_id).execute(&mut *tx).await?;
                         }
                     }
@@ -186,6 +208,7 @@ impl Job<AppState> for SendNotificationEmailJob {
                     SendOutcome::Sent => "sent",
                     SendOutcome::RateLimited => "rate_limited",
                     SendOutcome::Disabled => "transport_disabled",
+                    SendOutcome::Failed => "failed",
                 });
             }
         }
@@ -256,12 +279,41 @@ pub struct GameRunnerJob {
 #[async_trait::async_trait]
 impl Job<AppState> for GameRunnerJob {
     const NAME: &'static str = "GameRunnerJob";
+    /// No bound on a whole game: `MAX_TURNS` (5000) × 500 ms move timeout
+    /// plus proxy margin gives a worst case of ~67-110 min. 2h matches
+    /// `STUCK_GAME_MAX_AGE_HOURS`; kept bounded so a hung DB call is
+    /// still cut off (longest observed attempt: 874 s).
+    const MAX_RUNTIME: Duration = Duration::from_secs(2 * 60 * 60);
 
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
         // Run the game with HTTP calls to snake APIs, turn-by-turn persistence, and WebSocket notifications
         crate::game_runner::run_game(&app_state, self.game_id).await?;
         Ok(())
     }
+}
+
+/// True when a `GameRunnerJob` for `game_id` still exists in the queue —
+/// queued, locked/running, or waiting out retry backoff. Recovery paths use
+/// this to avoid enqueuing a second runner for a game one job already owns
+/// (DEV-2175). cja moves jobs that exhaust their retries to
+/// dead_letter_jobs, and panic/OOM-killed jobs are lease-reclaimed and stay
+/// in the queue, so a missing row means no runner will ever pick this game
+/// up again.
+pub async fn game_runner_job_exists<'e, E>(executor: E, game_id: Uuid) -> cja::Result<bool>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let exists = sqlx::query_scalar!(
+        r#"SELECT EXISTS(
+            SELECT 1 FROM jobs
+            WHERE name = 'GameRunnerJob' AND payload->>'game_id' = $1
+        ) AS "exists!""#,
+        game_id.to_string(),
+    )
+    .fetch_one(executor)
+    .await
+    .wrap_err("Failed to check for outstanding GameRunnerJob")?;
+    Ok(exists)
 }
 
 /// Job to discover games that need backup and enqueue individual backup jobs.
@@ -356,7 +408,8 @@ impl Job<AppState> for AchievementClipsSweepJob {
 
 /// Render one earn's clip GIF. Enqueued by the sweep at
 /// CLIP_JOB_PRIORITY; idempotent (a duplicate run is refused by the
-/// attempt claim and no-ops).
+/// attempt claim and no-ops). Renders serialize per process via
+/// `CONCURRENCY = PerProcess(1)`, enforced at claim (DEV-2427).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RenderAchievementClipJob {
     pub achievement_earn_id: Uuid,
@@ -365,6 +418,9 @@ pub struct RenderAchievementClipJob {
 #[async_trait::async_trait]
 impl Job<AppState> for RenderAchievementClipJob {
     const NAME: &'static str = "RenderAchievementClipJob";
+    /// Replaces the old in-body `CLIP_RENDER_SLOT`: cja enforces the cap
+    /// at claim, so no worker parks waiting for a render (DEV-2427).
+    const CONCURRENCY: Concurrency = Concurrency::PerProcess(NonZeroUsize::MIN);
 
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
         crate::achievement_clips::render_achievement_clip(&app_state, self.achievement_earn_id)
@@ -393,6 +449,10 @@ impl Job<AppState> for CustomizationActiveWeekBackfillJob {
 #[async_trait::async_trait]
 impl Job<AppState> for GameBackupJob {
     const NAME: &'static str = "GameBackupJob";
+    /// Observed 517-796 s (the 5000-row JSON rescan); restructured to
+    /// seconds in DEV-2427 (id-only select + batched checks). 30m is a
+    /// deliberate margin — leave it.
+    const MAX_RUNTIME: Duration = Duration::from_secs(30 * 60);
 
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
         crate::backup::run_backup_discovery(&app_state).await?;
@@ -402,7 +462,12 @@ impl Job<AppState> for GameBackupJob {
 
 /// Job to backup a single game from the Engine database to GCS.
 /// Enqueued by GameBackupJob and the play-history walk (DEV-1984) for each
-/// game that needs archiving.
+/// game that needs archiving. Member of the shared `"archive"` cja
+/// concurrency key (DEV-2432): one archive operation at a time per
+/// process across all four archive types, enforced at claim, so a wedged
+/// holder parks zero workers. The attempt's `ConcurrencySlot` rides into
+/// `spawn_blocking` closures, keeping the budget held while bounded CPU
+/// work runs even if the attempt is dropped (arena#221).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BackupSingleGameJob {
     pub engine_game_id: String,
@@ -411,9 +476,21 @@ pub struct BackupSingleGameJob {
 #[async_trait::async_trait]
 impl Job<AppState> for BackupSingleGameJob {
     const NAME: &'static str = "BackupSingleGameJob";
+    const CONCURRENCY: Concurrency = BACKUP_ARCHIVE_CONCURRENCY;
+    const MAX_RUNTIME: Duration = BACKUP_ARCHIVE_MAX_RUNTIME;
 
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
         crate::backup::backup_single_game(&app_state, &self.engine_game_id).await?;
+        Ok(())
+    }
+
+    async fn run_with_cancellation(
+        &self,
+        app_state: AppState,
+        _cancellation_token: CancellationToken,
+        slot: ConcurrencySlot,
+    ) -> cja::Result<()> {
+        crate::backup::backup_single_game_with_slot(&app_state, &self.engine_game_id, slot).await?;
         Ok(())
     }
 }
@@ -435,7 +512,11 @@ impl Job<AppState> for NativeGameBackupJob {
 }
 
 /// Archive one arena-native game to GCS. Enqueued by NativeGameBackupJob;
-/// idempotent (re-checks archived_at under the backup slot before any work).
+/// idempotent (re-checks archived_at inside the attempt before any work).
+/// Member of the shared `"archive"` cja concurrency key (DEV-2432): one
+/// archive operation at a time per process across all four archive types,
+/// enforced at claim; the attempt's slot rides into the compress
+/// `spawn_blocking` closure (arena#221).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NativeBackupSingleGameJob {
     pub game_id: Uuid,
@@ -444,9 +525,21 @@ pub struct NativeBackupSingleGameJob {
 #[async_trait::async_trait]
 impl Job<AppState> for NativeBackupSingleGameJob {
     const NAME: &'static str = "NativeBackupSingleGameJob";
+    const CONCURRENCY: Concurrency = BACKUP_ARCHIVE_CONCURRENCY;
+    const MAX_RUNTIME: Duration = BACKUP_ARCHIVE_MAX_RUNTIME;
 
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
         crate::native_backup::archive_native_game(&app_state, self.game_id).await?;
+        Ok(())
+    }
+
+    async fn run_with_cancellation(
+        &self,
+        app_state: AppState,
+        _cancellation_token: CancellationToken,
+        slot: ConcurrencySlot,
+    ) -> cja::Result<()> {
+        crate::native_backup::archive_native_game_with_slot(&app_state, self.game_id, slot).await?;
         Ok(())
     }
 }
@@ -469,8 +562,12 @@ impl Job<AppState> for TurnRetentionJob {
 /// Prune one archived native game's `turns` rows (snake_turns cascade)
 /// after confirming the archive object's content (version, id, frames).
 /// Enqueued by TurnRetentionJob; idempotent — the prune predicate is
-/// re-checked under the backup slot and `turns_pruned_at` is set inside
-/// the delete transaction.
+/// re-checked inside the attempt and `turns_pruned_at` is set inside
+/// the delete transaction. Member of the shared `"archive"` cja
+/// concurrency key (DEV-2432): one archive operation at a time per
+/// process across all four archive types, enforced at claim; the
+/// attempt's slot rides into the confirm `spawn_blocking` closure
+/// (arena#221).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PruneGameTurnsJob {
     pub game_id: Uuid,
@@ -479,9 +576,22 @@ pub struct PruneGameTurnsJob {
 #[async_trait::async_trait]
 impl Job<AppState> for PruneGameTurnsJob {
     const NAME: &'static str = "PruneGameTurnsJob";
+    const CONCURRENCY: Concurrency = BACKUP_ARCHIVE_CONCURRENCY;
+    const MAX_RUNTIME: Duration = BACKUP_ARCHIVE_MAX_RUNTIME;
 
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
         crate::turn_retention::prune_game_turns(&app_state, self.game_id).await
+    }
+
+    async fn run_with_cancellation(
+        &self,
+        app_state: AppState,
+        _cancellation_token: CancellationToken,
+        slot: ConcurrencySlot,
+    ) -> cja::Result<()> {
+        crate::turn_retention::prune_game_turns_with_slot(&app_state, self.game_id, slot)
+            .await
+            .map(|_| ())
     }
 }
 
@@ -500,6 +610,55 @@ impl Job<AppState> for PlayHistoryWalkJob {
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
         crate::play_history_walk::run_walk_tick(&app_state).await?;
         Ok(())
+    }
+}
+
+/// Cron (5 min): fill the dropped-fields repair queue once from the
+/// census list, then trickle DroppedFieldsRepairGameJob under the shared
+/// in-flight ceiling. See [`crate::dropped_fields_repair`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DroppedFieldsRepairSweepJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for DroppedFieldsRepairSweepJob {
+    const NAME: &'static str = "DroppedFieldsRepairSweepJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::dropped_fields_repair::run_sweep_tick(&app_state).await
+    }
+}
+
+/// Repair one game: new v2 object (create-only) with Team/Mode/
+/// MaxTurnsToNextFoodSpawn restored, verify the built export BEFORE any
+/// write, repoint the row, invalidate the archive cache. See
+/// [`crate::dropped_fields_repair`]. Member of the shared `"archive"` cja
+/// concurrency key (DEV-2432): one archive operation at a time per
+/// process across all four archive types, enforced at claim; the
+/// attempt's slot rides into the decode `spawn_blocking` closures
+/// (arena#221).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DroppedFieldsRepairGameJob {
+    pub engine_game_id: String,
+}
+
+#[async_trait::async_trait]
+impl Job<AppState> for DroppedFieldsRepairGameJob {
+    const NAME: &'static str = "DroppedFieldsRepairGameJob";
+    const CONCURRENCY: Concurrency = BACKUP_ARCHIVE_CONCURRENCY;
+    const MAX_RUNTIME: Duration = BACKUP_ARCHIVE_MAX_RUNTIME;
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::dropped_fields_repair::repair_game(&app_state, &self.engine_game_id).await
+    }
+
+    async fn run_with_cancellation(
+        &self,
+        app_state: AppState,
+        _cancellation_token: CancellationToken,
+        slot: ConcurrencySlot,
+    ) -> cja::Result<()> {
+        crate::dropped_fields_repair::repair_game_with_slot(&app_state, &self.engine_game_id, slot)
+            .await
     }
 }
 
@@ -594,10 +753,12 @@ impl Job<AppState> for UpdateTournamentStatusJob {
     }
 }
 
-/// Cron job that re-enqueues evaluation for tournament matches whose driving
-/// jobs died (the job system deletes jobs that exhaust their retries, so a
-/// match can otherwise get stuck in progress forever). Runs every couple of
-/// minutes; see [`crate::tournament_match::sweep_stuck_matches`].
+/// Cron job that re-enqueues evaluation for stuck tournament matches whose
+/// driving jobs died — stale in-progress matches, scheduled matches
+/// stranded in a started round — and recovers lost round progression (the
+/// job system deletes jobs that exhaust their retries, so a tournament can
+/// otherwise get stuck forever). Runs every couple of minutes; see
+/// [`crate::tournament_match::sweep_stuck_matches`].
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StuckMatchSweeperJob;
 
@@ -624,6 +785,28 @@ impl Job<AppState> for RateLimitPruneJob {
 
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
         crate::models::rate_limit::prune_old_attempts(&app_state.db).await?;
+        Ok(())
+    }
+}
+
+/// Cron job: batched prune of expired `sessions` rows (DEV-2185). Every
+/// request without a cookie creates a row and nothing deleted them before;
+/// see [`crate::models::session::clean_expired_sessions`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SessionPruneJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for SessionPruneJob {
+    const NAME: &'static str = "SessionPruneJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        let deleted = crate::models::session::clean_expired_sessions(
+            &app_state.db,
+            crate::models::session::SESSION_PRUNE_BATCH_ROWS,
+            crate::models::session::SESSION_PRUNE_MAX_BATCHES,
+        )
+        .await?;
+        tracing::info!(deleted, "Expired session prune completed");
         Ok(())
     }
 }
@@ -695,6 +878,8 @@ cja::impl_job_registry!(
     RenderAchievementClipJob,
     BackupSingleGameJob,
     PlayHistoryWalkJob,
+    DroppedFieldsRepairSweepJob,
+    DroppedFieldsRepairGameJob,
     NativeGameBackupJob,
     NativeBackupSingleGameJob,
     TurnRetentionJob,
@@ -706,6 +891,7 @@ cja::impl_job_registry!(
     UpdateTournamentStatusJob,
     StuckMatchSweeperJob,
     RateLimitPruneJob,
+    SessionPruneJob,
     SnakeHealthSweeperJob,
     StuckGameSweeperJob,
     ScreenShoutsJob,

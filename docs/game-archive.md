@@ -99,10 +99,87 @@ The `backup_batches` TABLE remains for DEV-1545.
 - **Streamed writer**: production builds v2 objects through the
   incremental `ExportWriter` (frames paged 200 at a time through one
   zstd stream, parse/serialize/compress on the blocking pool under the
-  `BACKUP_SLOT`) — byte-identical to the one-shot reference builder and
-  bounded to ~one page of memory, so the 285 games over 1,000 frames
-  (max 5,567) can't OOM the 1 GiB box the way the old whole-game fetch
-  correlated with.
+  shared `"archive"` concurrency key) — byte-identical to the one-shot
+  reference builder and bounded to ~one page of memory, so the 285 games
+  over 1,000 frames (max 5,567) can't OOM the 1 GiB box the way the old
+  whole-game fetch correlated with. Since DEV-2432 all four archive job
+  types (`BackupSingleGameJob`, `NativeBackupSingleGameJob`,
+  `PruneGameTurnsJob`, `DroppedFieldsRepairGameJob`) share one cja
+  `PerProcessShared` key (limit 1, enforced at claim), so a wedged
+  holder parks zero workers and game runners always stay claimable;
+  each attempt is bounded by a 5-minute `MAX_RUNTIME`. The attempt's
+  `ConcurrencySlot` moves into the `spawn_blocking` closures, keeping
+  the budget held while bounded CPU work runs even if the attempt is
+  dropped (arena#221). Achievement-clip renders use a per-type cap
+  (`RenderAchievementClipJob`, replacing the old `CLIP_RENDER_SLOT`
+  since DEV-2427).
+
+## Dropped-fields repair (DEV-2344)
+
+The January 2026 fork-join backfill exported through typed structs that
+lacked three engine JSON keys — serde ignores unknown fields — so **1,024
+v1 objects under `games/1970/01/01/` are missing them**: snake `Team` (a
+string; non-empty in **403** team-mode games, 2020-03-27 to 2020-07-17),
+header `Mode` (a string; **994** games), and header
+`MaxTurnsToNextFoodSpawn` (a JSON **number**, always 12; **815** games).
+All are 2019-11 to 2020-07 games; the DEV-1984 walk's v2 objects are
+unaffected. The engine DB is the only remaining copy, so the repair must
+finish before the engine DB teardown after Play closes 2026-11-30.
+
+- **Flow**: `DroppedFieldsRepairSweepJob` (cron, 5 min) fills the
+  `dropped_fields_repair_queue` table ONCE from the checked-in census
+  list (`server/src/dropped_fields_repair_ids.txt`, 1,024 engine game
+  ids = `team_games.txt` ∪ `mode_ids.txt` from the coordinator's
+  evidence), filtered to arena rows still on the v1 1970 path — no
+  engine-DB query during fill. It then trickles
+  `DroppedFieldsRepairGameJob`s (one game each, `BACKUP_JOB_PRIORITY`)
+  under an in-flight ceiling of 25; with no pending rows left the sweep
+  is a cheap no-op that still emits its done line every tick. Queue rows
+  are never deleted, so "empty" means "never filled".
+- **Per game**: fix the structs (`engine_models.rs` gained
+  `EngineSnake.team`, `EngineGame.mode`,
+  `EngineGame.max_turns_to_next_food_spawn`, all `Option` +
+  `skip_serializing_if` so other games' bytes don't change) → re-export
+  through the normal v2 writer inside the shared `"archive"` budget → **verify the built
+  bytes against the engine BEFORE any write** (every frame normalized
+  and Value-equal, header fields compared as JSON Values) → create-only
+  put (`put_if_absent`, GCS `ifGenerationMatch=0`) at the correct date
+  path → read back → one predicate-guarded UPDATE repoints
+  `gcs_path`/`archive_version` → the archive cache entry is invalidated
+  (peek/insert are path-aware, so correctness never depended on it).
+- **Never overwrite**: no existing object is ever overwritten or deleted
+  (the bucket has no versioning, DEV-2128) and the old v1 objects under
+  `games/1970/01/01/` stay. An object already at the target (crash
+  recovery) is verified and reused, never rewritten.
+- **Failure semantics**: `Err` retries (GCS 5xx, timeouts, read-back
+  anomalies); a `failed` queue row is terminal (missing rows,
+  unparseable headers, verify mismatches) and **blocks engine-DB
+  teardown sign-off**. Re-arm after fixing the cause (no cursor to
+  rewind): `UPDATE dropped_fields_repair_queue SET status = 'pending',
+  reason = NULL WHERE engine_game_id = '…';`
+- **Reconciliation from logs**: fill line "queue filled from census
+  list" (`filled` = 1,024 expected; an `error` "listed games not queued"
+  line lists any missing ids); per-game lines "Re-archived game with
+  dropped fields restored" — count `mode: Some(` → 994,
+  `max_turns_to_next_food_spawn: Some(` → 815, `team_frames: N > 0` →
+  403; done line "dropped-fields repair complete" fires on every tick
+  once no pending rows remain (the `error`-level "complete with
+  failures" variant means failed rows exist). Count convergence from
+  `SELECT status, COUNT(*) FROM dropped_fields_repair_queue GROUP BY
+  status`, not from `games.archived_at`/`updated_at` bins.
+- **Rollback**: restore each row's pre-repair pointers, captured at fill
+  time (`updated_at` bumps via the trigger):
+
+  ```sql
+  UPDATE games g
+  SET gcs_path = q.old_gcs_path, archive_version = q.old_archive_version
+  FROM dropped_fields_repair_queue q
+  WHERE g.engine_game_id = q.engine_game_id
+    AND q.status = 'done';
+  ```
+
+  (scope per game or run for all `done` rows — the old v1 objects are
+  still in place.)
 
 ## Who reads
 
@@ -166,24 +243,47 @@ prune inside that window could re-credit a WRONG week). The predicate's
 partial index is `games_turns_prunable_idx`; rows leave it when
 `turns_pruned_at` is set, which is also the idempotency marker.
 
+**Invariant (DEV-2178)**: the `games` CHECK
+`games_pruned_requires_archive_check` enforces
+`turns_pruned_at IS NULL OR (archived_at IS NOT NULL AND gcs_path IS NOT
+NULL)` — a pruned game always carries the pointers naming its only
+surviving frame copy. Clearing a pruned game's pointers (by hand or via
+`mark_game_finished_tx` on a failed-era pruned game) is rejected by the
+constraint; the archiver independently refuses pruned games and refuses
+to write a zero-frame export, so a pruned game's deterministic key can
+never be overwritten with an empty archive. Terminal native games with
+no persisted frames (zero-frame) are never archived, never pruned (the
+prune requires `archived_at`), and stay out of discovery's enqueue set.
+
 **Content confirmation before delete**: GET the object, decode it, and
 require `archive_version = 2`, `game_id` matching the row, and frames
 equal one-for-one (as `serde_json::Value`) to what the archiver would
 write now (`native_backup::fetch_native_frame_texts` — the same selection
 on both sides). Rows are NEVER deleted for a game whose object is missing,
-undecodable, wrong-version, wrong-id, or content/frame-count mismatched:
-those are retained (fail-closed — the turns are the only complete copy),
-logged at ERROR, re-enqueued hourly. Remedy for permanently stuck games:
-clear `archived_at`/`gcs_path`/`archive_version` so DEV-1980 discovery
+undecodable, wrong-version, wrong-id, or content-diverged: those are
+retained (fail-closed — the turns are the only complete copy), logged at
+ERROR, re-enqueued hourly. Remedy for permanently stuck games: clear
+`archived_at`/`gcs_path`/`archive_version` so DEV-1980 discovery
 re-archives (the path is deterministic, so the re-archive overwrites the
 bad object). Enough stuck games (≥ the 2000/run cap) stall pruning
-entirely — visible as discovery candidates that never shrink.
+entirely — visible as discovery candidates that never shrink. The one
+self-healing case: a frame-count mismatch where the DB holds MORE frames
+and the object is a confirmed strict PREFIX of them (the sweeper race —
+archived mid-run, straggler turns after) is a stale archive: the prune
+clears the archive pointers itself (a guarded UPDATE keyed on the
+`archived_at` it read and `turns_pruned_at IS NULL`, logged at WARN),
+discovery re-archives the complete game within the hour, and the next
+prune confirms and deletes. An archive holding MORE frames than the DB,
+or a divergent prefix, stays fail-closed.
 
 **Concurrency**: per-game prune jobs (`PruneGameTurnsJob`, priority −20,
-below backup jobs' −10) serialize on the shared 1-permit `BACKUP_SLOT`
-(one heavy archive-family op per instance; never concurrent with a
-backup). The slot is acquired BEFORE the eligibility re-check, so
-duplicate jobs on one instance are silent no-ops; the slot is
+below backup jobs' −10) serialize with every other archive-family type
+on the shared `"archive"` cja concurrency key (limit 1, per process;
+never concurrent with a backup). Since DEV-2432 the key is enforced at
+claim — a saturated key makes archive rows invisible, so a hung prune
+parks zero workers — and each attempt is bounded by the 5-minute
+`MAX_RUNTIME`. The predicate re-check runs inside the attempt, so
+duplicate jobs on one instance are silent no-ops; the key is
 per-process, so a duplicate racing another INSTANCE's prune is caught
 after the content confirm instead (a 0-frame count mismatch re-reads
 `turns_pruned_at` and skips silently when the other instance already

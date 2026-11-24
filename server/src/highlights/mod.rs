@@ -570,8 +570,8 @@ mod tests {
 
     async fn seed_user(pool: &PgPool, github_login: &str) -> Uuid {
         sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ((SELECT COALESCE(MAX(external_github_id), 991000) + 1 FROM users), $1, '')
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ((SELECT COALESCE(MAX(external_github_id), 991000) + 1 FROM users), $1)
              RETURNING user_id",
         )
         .bind(github_login)
@@ -605,8 +605,8 @@ mod tests {
         .await
         .unwrap();
         let leaderboard_game_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO leaderboard_games (leaderboard_id, game_id, created_at)
-             VALUES ($1, $2, $3) RETURNING leaderboard_game_id",
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id, created_at, season_id)
+             VALUES ($1, $2, $3, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1)) RETURNING leaderboard_game_id",
         )
         .bind(ladder)
         .bind(game_id)
@@ -627,14 +627,15 @@ mod tests {
             .await
             .unwrap();
             let entry_id: Uuid = sqlx::query_scalar(
-                "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-                 VALUES ($1, $2) RETURNING leaderboard_entry_id",
+                "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+                 VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2) RETURNING leaderboard_entry_id",
             )
             .bind(ladder)
             .bind(snake_id)
             .fetch_one(pool)
             .await
             .unwrap();
+            crate::routes::test_support::register_snake_entries(pool, snake_id).await;
             let placement = if i == winner { 1 } else { 2 };
             gb_ids[i] = sqlx::query_scalar(
                 "INSERT INTO game_battlesnakes (game_id, battlesnake_id, leaderboard_entry_id, placement)

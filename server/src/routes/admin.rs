@@ -20,7 +20,7 @@ use crate::models::moderation_flag::{self, ModerationFlagListing};
 use crate::models::private_leaderboard::{
     self, BOARD_SIZES, CreatePrivateLeaderboard, GAME_TYPES, MATCH_SIZES,
 };
-use crate::models::{email_log, notification_email};
+use crate::models::{email_log, leaderboard, leaderboard_season, notification_email};
 use crate::notifications::{NotificationChannel, NotificationKind};
 use crate::routes::auth::{AdminApiUser, AdminUser};
 use crate::state::AppState;
@@ -522,15 +522,20 @@ pub async fn send_test_email(
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     let kind = email_kind(&key)?;
-    let mut tx = state.db.begin().await?;
-    let address = notification_email::resolved_recipient(&mut tx, user.user_id).await?;
+    // Scope the connection so it is released before the Mailgun call (which
+    // takes up to 10s and acquires its own pool connection for the log
+    // transaction inside `send_limited`).
+    let address = {
+        let mut connection = state.db.acquire().await?;
+        notification_email::resolved_recipient(&mut connection, user.user_id).await?
+    };
     let mut outcome = "No notification address is available; no test was sent.".to_string();
     if let Some(to) = &address {
         let message = sample_message(kind, &state.config.base_url, to)?;
         outcome = match state
             .mailer
             .send_limited(
-                &mut tx,
+                &state.db,
                 state.config.email_per_recipient_hourly_limit,
                 email_log::ADMIN_TEST_PURPOSE,
                 &message,
@@ -540,24 +545,16 @@ pub async fn send_test_email(
             Ok(SendOutcome::Sent) => "Sent".into(),
             Ok(SendOutcome::Disabled) => "Disabled (no Mailgun config)".into(),
             Ok(SendOutcome::RateLimited) => "RateLimited".into(),
+            Ok(SendOutcome::Failed) => {
+                "Failed (Mailgun rejected the message; see server logs, event_type=email_rejected)"
+                    .into()
+            }
             Err(err) => {
                 tracing::error!(error = %format!("{err:#}"), "Admin test email failed");
                 format!("{err:#}")
             }
         };
     }
-    let status = match tx.commit().await {
-        Ok(()) => StatusCode::OK,
-        Err(err) => {
-            tracing::error!(error = %format!("{err:#}"), "Admin test email attempt commit failed");
-            outcome = if outcome == "Sent" {
-                format!("Mailgun accepted the email, but recording the attempt failed: {err:#}")
-            } else {
-                format!("{outcome}; recording the attempt failed: {err:#}")
-            };
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    };
     let message = sample_message(kind, &state.config.base_url, "sample@example.com")?;
     let page = page_factory.create_page(
         kind.name().into(),
@@ -568,7 +565,7 @@ pub async fn send_test_email(
             Some(&outcome),
         )),
     );
-    Ok((status, [(header::CACHE_CONTROL, "no-store")], page))
+    Ok((StatusCode::OK, [(header::CACHE_CONTROL, "no-store")], page))
 }
 
 /// GET /admin/moderation — unreviewed moderation flags, newest first.
@@ -910,7 +907,7 @@ pub async fn list_leaderboards(
                     @let path = format!("/leaderboards/{}", lb.leaderboard_id);
                     article class="admin-lb" aria-label=(lb.name) {
                         h3 {
-                            a href=(path) { (lb.name) }
+                            a id={"lb-name-"(lb.leaderboard_id)} href=(path) { (lb.name) }
                             " "
                             @if lb.disabled_at.is_some() {
                                 span class="badge" { "Inactive" }
@@ -924,6 +921,9 @@ pub async fn list_leaderboards(
                             div { dt { "Mode" } dd { (lb.game_type) " · " (lb.board_size) " · " (lb.match_size) " snakes" } }
                             div { dt { "Active snakes" } dd { (lb.active_entries) } }
                         }
+                        // aria-describedby, not aria-label: an accessible name containing
+                        // the league name would collide with the league link's name.
+                        a class="btn" href=(format!("/admin/leaderboards/{}", lb.leaderboard_id)) aria-describedby={"lb-name-"(lb.leaderboard_id)} { "Seasons" }
                         form method="post" action=(format!("/admin/leaderboards/{}/invite-code", lb.leaderboard_id)) {
                             button type="submit" class="btn" aria-label={"Regenerate invite code for " (lb.name)} {
                                 "Regenerate invite code"
@@ -943,12 +943,13 @@ pub async fn list_leaderboards(
                                 th { "Mode" }
                                 th class="r" { "Active snakes" }
                                 th class="r" { "Status" }
+                                th class="r" { "Seasons" }
                             }
                         }
                         tbody {
                             @for lb in &public {
                                 tr {
-                                    td { a href={"/leaderboards/"(lb.leaderboard_id)} { (lb.name) } }
+                                    td { a id={"lb-name-"(lb.leaderboard_id)} href={"/leaderboards/"(lb.leaderboard_id)} { (lb.name) } }
                                     td { (lb.game_type) " · " (lb.board_size) " · " (lb.match_size) }
                                     td class="r num" { (lb.active_entries) }
                                     td class="r" {
@@ -957,6 +958,9 @@ pub async fn list_leaderboards(
                                         } @else {
                                             span class="badge ok" { "Active" }
                                         }
+                                    }
+                                    td class="r" {
+                                        a href={"/admin/leaderboards/"(lb.leaderboard_id)} aria-describedby={"lb-name-"(lb.leaderboard_id)} { "Seasons" }
                                     }
                                 }
                             }
@@ -1022,6 +1026,369 @@ pub async fn regenerate_invite_code(
         .await
         .wrap_err("Failed to flash")?;
     Ok(Redirect::to("/admin/leaderboards"))
+}
+
+// ---------------------------------------------------------------------------
+// Leaderboard seasons
+// ---------------------------------------------------------------------------
+
+/// The season form's timezone when none is given.
+pub const DEFAULT_SEASON_TIMEZONE: &str = "America/New_York";
+
+#[derive(Debug, Deserialize)]
+pub struct AdminLeaderboardQuery {
+    /// IANA timezone the page shows and prefills times in.
+    #[serde(default)]
+    pub timezone: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateSeasonForm {
+    pub name: String,
+    pub starts_at: String,
+    #[serde(default)]
+    pub ends_at: Option<String>,
+    pub timezone: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EditSeasonForm {
+    pub name: String,
+    /// Only an upcoming season's form submits it.
+    #[serde(default)]
+    pub starts_at: Option<String>,
+    /// Only upcoming and active seasons' forms submit it; empty = open-ended.
+    #[serde(default)]
+    pub ends_at: Option<String>,
+    /// The stored instants the form was prefilled from (ISO UTC), so an
+    /// unchanged time in a repeated DST hour passes through.
+    #[serde(default)]
+    pub starts_at_current: Option<String>,
+    #[serde(default)]
+    pub ends_at_current: Option<String>,
+    pub timezone: String,
+}
+
+fn parse_hidden_instant(value: Option<&str>) -> Option<DateTime<Utc>> {
+    value
+        .and_then(|s| DateTime::parse_from_rfc3339(s.trim()).ok())
+        .map(|t| t.with_timezone(&Utc))
+}
+
+/// Where a season form returns to: the league's admin page, keeping a
+/// non-default timezone so times read the way they were typed.
+fn season_admin_url(leaderboard_id: Uuid, timezone: Option<&chrono_tz::Tz>) -> String {
+    match timezone {
+        Some(tz) if tz.name() != DEFAULT_SEASON_TIMEZONE => {
+            format!(
+                "/admin/leaderboards/{leaderboard_id}?timezone={}",
+                urlencoding::encode(tz.name())
+            )
+        }
+        _ => format!("/admin/leaderboards/{leaderboard_id}"),
+    }
+}
+
+/// Flash a season mutation's refusal; anything that isn't a validation
+/// error propagates as a 500.
+async fn flash_season_error(flasher: &Flasher, error: cja::color_eyre::Report) -> cja::Result<()> {
+    let Some(validation) = error.downcast_ref::<leaderboard_season::ValidationError>() else {
+        return Err(error);
+    };
+    flasher
+        .error(validation.0)
+        .await
+        .wrap_err("Failed to flash")
+}
+
+/// GET /admin/leaderboards/{id} — league detail and season management.
+#[allow(clippy::too_many_lines)]
+pub async fn show_admin_leaderboard(
+    State(state): State<AppState>,
+    AdminUser(_user): AdminUser,
+    Path(leaderboard_id): Path<Uuid>,
+    axum::extract::Query(query): axum::extract::Query<AdminLeaderboardQuery>,
+    page_factory: PageFactory,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let Some(lb) = leaderboard::get_leaderboard_by_id(&state.db, leaderboard_id).await? else {
+        return Err("Leaderboard not found".to_string()).with_status(StatusCode::NOT_FOUND);
+    };
+    let leaderboard_season::SeasonLookup::Found(selection) =
+        leaderboard_season::select_season(&state.db, leaderboard_id, None).await?
+    else {
+        return Err("Leaderboard not found".to_string()).with_status(StatusCode::NOT_FOUND);
+    };
+    let tz = query
+        .timezone
+        .as_deref()
+        .and_then(|name| leaderboard_season::parse_timezone(name).ok())
+        .unwrap_or(chrono_tz::America::New_York);
+    let tz_name = tz.name();
+    let base = format!("/admin/leaderboards/{leaderboard_id}");
+    let fmt = |t: DateTime<Utc>| leaderboard_season::render_in_zone(t, &tz).replace('T', " ");
+
+    let page = page_factory.create_page(
+        format!("{} seasons", lb.name),
+        Box::new(html! {
+            div class="crumb" {
+                a href="/admin" { "Admin" } " / "
+                a href="/admin/leaderboards" { "Leaderboards" } " / " (lb.name)
+            }
+            div class="page-head" {
+                h1 { (lb.name) }
+                div class="sub" {
+                    (lb.game_type) " · " (lb.board_size) " · " (lb.match_size) " snakes · "
+                    a href={"/leaderboards/"(leaderboard_id)} { "View leaderboard" }
+                }
+            }
+
+            div class="section" {
+                h2 { "Seasons" }
+                p class="empty" { "Times are shown in " (tz_name) "." }
+                @for info in &selection.seasons {
+                    @let season = &info.season;
+                    @let action = format!("{base}/seasons/{}/edit", season.season_id);
+                    article class="admin-lb admin-season" aria-label=(season.name) {
+                        h3 {
+                            (season.name) " "
+                            @match info.phase {
+                                leaderboard_season::SeasonPhase::Active => { span class="badge ok" { "Active" } }
+                                leaderboard_season::SeasonPhase::Upcoming => { span class="badge" { "Upcoming" } }
+                                leaderboard_season::SeasonPhase::Ended => { span class="badge" { "Ended" } }
+                            }
+                        }
+                        dl class="meta-list" {
+                            div { dt { "Starts" } dd { (fmt(season.starts_at)) } }
+                            div { dt { "Ends" } dd {
+                                @if let Some(end) = season.ends_at { (fmt(end)) } @else { "Open-ended" }
+                            } }
+                        }
+                        form class="form-stack" method="post" action=(action) {
+                            input type="hidden" name="timezone" value=(tz_name);
+                            div class="field" {
+                                label for={"name-"(season.season_id)} { "Name" }
+                                input id={"name-"(season.season_id)} type="text" name="name" required maxlength="100" value=(season.name);
+                            }
+                            @if info.phase == leaderboard_season::SeasonPhase::Upcoming {
+                                input type="hidden" name="starts_at_current" value=(season.starts_at.to_rfc3339());
+                                div class="field" {
+                                    label for={"starts-"(season.season_id)} { "Starts (" (tz_name) ")" }
+                                    input id={"starts-"(season.season_id)} type="datetime-local" name="starts_at" required
+                                        value=(leaderboard_season::render_in_zone(season.starts_at, &tz));
+                                }
+                            }
+                            @if info.phase != leaderboard_season::SeasonPhase::Ended {
+                                @if let Some(end) = season.ends_at {
+                                    input type="hidden" name="ends_at_current" value=(end.to_rfc3339());
+                                }
+                                div class="field" {
+                                    label for={"ends-"(season.season_id)} { "Ends (" (tz_name) ", blank = open-ended)" }
+                                    input id={"ends-"(season.season_id)} type="datetime-local" name="ends_at"
+                                        value=(season.ends_at.map(|end| leaderboard_season::render_in_zone(end, &tz)).unwrap_or_default());
+                                }
+                            }
+                            button type="submit" class="btn" aria-label={"Save " (season.name)} { "Save" }
+                        }
+                        @if info.phase == leaderboard_season::SeasonPhase::Upcoming {
+                            form method="post" action={(base) "/seasons/" (season.season_id) "/delete"} {
+                                button type="submit" class="btn" aria-label={"Delete " (season.name)} { "Delete season" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            div class="section" {
+                h2 { "New season" }
+                form class="form-stack" method="post" action={(base) "/seasons"} {
+                    div class="field" {
+                        label for="season-name" { "Name" }
+                        input id="season-name" type="text" name="name" required maxlength="100";
+                    }
+                    div class="field" {
+                        label for="season-starts" { "Starts" }
+                        input id="season-starts" type="datetime-local" name="starts_at" required;
+                    }
+                    div class="field" {
+                        label for="season-ends" { "Ends (blank = open-ended)" }
+                        input id="season-ends" type="datetime-local" name="ends_at";
+                    }
+                    div class="field" {
+                        label for="season-timezone" { "Timezone" }
+                        input id="season-timezone" type="text" name="timezone" required value=(tz_name);
+                    }
+                    p class="empty" {
+                        "Seasons can't overlap — to schedule the next one, first set the current season's end date."
+                    }
+                    button type="submit" class="btn solid" { "Create season" }
+                }
+            }
+        }),
+    );
+    Ok(([(header::CACHE_CONTROL, "no-store")], page))
+}
+
+/// POST /admin/leaderboards/{id}/seasons — schedule a new season.
+pub async fn create_season(
+    State(state): State<AppState>,
+    AdminUser(_user): AdminUser,
+    flasher: Flasher,
+    Path(leaderboard_id): Path<Uuid>,
+    Form(form): Form<CreateSeasonForm>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    if leaderboard::get_leaderboard_by_id(&state.db, leaderboard_id)
+        .await?
+        .is_none()
+    {
+        return Err("Leaderboard not found".to_string()).with_status(StatusCode::NOT_FOUND);
+    }
+    let tz = match leaderboard_season::parse_timezone(&form.timezone) {
+        Ok(tz) => tz,
+        Err(message) => {
+            flasher.error(message).await.wrap_err("Failed to flash")?;
+            return Ok(Redirect::to(&season_admin_url(leaderboard_id, None)));
+        }
+    };
+    let redirect = Redirect::to(&season_admin_url(leaderboard_id, Some(&tz)));
+
+    let starts_at = match leaderboard_season::parse_local_in_zone(&form.starts_at, &tz, None) {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            flasher
+                .error("A start time is required.")
+                .await
+                .wrap_err("Failed to flash")?;
+            return Ok(redirect);
+        }
+        Err(message) => {
+            flasher.error(message).await.wrap_err("Failed to flash")?;
+            return Ok(redirect);
+        }
+    };
+    let ends_at = match leaderboard_season::parse_local_in_zone(
+        form.ends_at.as_deref().unwrap_or(""),
+        &tz,
+        None,
+    ) {
+        Ok(t) => t,
+        Err(message) => {
+            flasher.error(message).await.wrap_err("Failed to flash")?;
+            return Ok(redirect);
+        }
+    };
+
+    let input = leaderboard_season::NewSeason {
+        name: form.name,
+        starts_at,
+        ends_at,
+    };
+    match leaderboard_season::create_season(&state.db, leaderboard_id, input).await {
+        Ok(Some(season)) => {
+            flasher
+                .success(format!("Scheduled {}.", season.name))
+                .await
+                .wrap_err("Failed to flash")?;
+        }
+        Ok(None) => {
+            flasher
+                .error("A season can't start in the past.")
+                .await
+                .wrap_err("Failed to flash")?;
+        }
+        Err(error) => flash_season_error(&flasher, error).await?,
+    }
+    Ok(redirect)
+}
+
+/// POST /admin/leaderboards/{id}/seasons/{season_id}/edit
+pub async fn edit_season(
+    State(state): State<AppState>,
+    AdminUser(_user): AdminUser,
+    flasher: Flasher,
+    Path((leaderboard_id, season_id)): Path<(Uuid, Uuid)>,
+    Form(form): Form<EditSeasonForm>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let tz = match leaderboard_season::parse_timezone(&form.timezone) {
+        Ok(tz) => tz,
+        Err(message) => {
+            flasher.error(message).await.wrap_err("Failed to flash")?;
+            return Ok(Redirect::to(&season_admin_url(leaderboard_id, None)));
+        }
+    };
+    let redirect = Redirect::to(&season_admin_url(leaderboard_id, Some(&tz)));
+
+    let starts_current = parse_hidden_instant(form.starts_at_current.as_deref());
+    let ends_current = parse_hidden_instant(form.ends_at_current.as_deref());
+
+    let starts_at = match form.starts_at.as_deref() {
+        None => None,
+        Some(local) => match leaderboard_season::parse_local_in_zone(local, &tz, starts_current) {
+            Ok(Some(t)) => Some(t),
+            Ok(None) => {
+                flasher
+                    .error("A start time is required.")
+                    .await
+                    .wrap_err("Failed to flash")?;
+                return Ok(redirect);
+            }
+            Err(message) => {
+                flasher.error(message).await.wrap_err("Failed to flash")?;
+                return Ok(redirect);
+            }
+        },
+    };
+    let ends_at = match form.ends_at.as_deref() {
+        None => None,
+        Some(local) => match leaderboard_season::parse_local_in_zone(local, &tz, ends_current) {
+            Ok(t) => Some(t),
+            Err(message) => {
+                flasher.error(message).await.wrap_err("Failed to flash")?;
+                return Ok(redirect);
+            }
+        },
+    };
+
+    let edit = leaderboard_season::SeasonEdit {
+        name: form.name,
+        starts_at,
+        ends_at,
+    };
+    match leaderboard_season::update_season(&state.db, leaderboard_id, season_id, edit).await {
+        Ok(Some(season)) => {
+            flasher
+                .success(format!("Saved {}.", season.name))
+                .await
+                .wrap_err("Failed to flash")?;
+        }
+        Ok(None) => {
+            return Err("Season not found".to_string()).with_status(StatusCode::NOT_FOUND);
+        }
+        Err(error) => flash_season_error(&flasher, error).await?,
+    }
+    Ok(redirect)
+}
+
+/// POST /admin/leaderboards/{id}/seasons/{season_id}/delete — only a season
+/// that hasn't started.
+pub async fn delete_season(
+    State(state): State<AppState>,
+    AdminUser(_user): AdminUser,
+    flasher: Flasher,
+    Path((leaderboard_id, season_id)): Path<(Uuid, Uuid)>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    match leaderboard_season::delete_season(&state.db, leaderboard_id, season_id).await {
+        Ok(true) => {
+            flasher
+                .success("Season deleted.")
+                .await
+                .wrap_err("Failed to flash")?;
+        }
+        Ok(false) => {
+            return Err("Season not found".to_string()).with_status(StatusCode::NOT_FOUND);
+        }
+        Err(error) => flash_season_error(&flasher, error).await?,
+    }
+    Ok(Redirect::to(&season_admin_url(leaderboard_id, None)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1940,10 +2307,12 @@ mod email_tests {
         sqlx::query!("CREATE CONSTRAINT TRIGGER reject_admin_test_commit AFTER INSERT ON email_log DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_admin_test_commit()")
             .execute(&pool).await?;
         let mock = MockServer::start().await;
+        // Under the log-before-send flow, a failing log commit aborts the
+        // send before any HTTP attempt: the mock must see zero requests.
         Mock::given(method("POST"))
             .and(path("/v3/example.test/messages"))
             .respond_with(ResponseTemplate::new(200))
-            .expect(1)
+            .expect(0)
             .mount(&mock)
             .await;
         state.mailer = Mailer::new(
@@ -1963,13 +2332,15 @@ mod email_tests {
             "",
         )
         .await;
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        // The commit error surfaces as a transient send error, rendered on
+        // the (200) result page — never as a claim that the email was sent.
+        assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers().get(header::CACHE_CONTROL).unwrap(),
             "no-store"
         );
         let html = body(response).await;
-        assert!(html.contains("Mailgun accepted the email, but recording the attempt failed"));
+        assert!(html.contains("Failed to commit email log transaction"));
         assert!(html.contains("commit &lt;blocked&gt;"));
         assert!(!html.contains("commit <blocked>"));
         assert!(!html.contains(">Sent<"));

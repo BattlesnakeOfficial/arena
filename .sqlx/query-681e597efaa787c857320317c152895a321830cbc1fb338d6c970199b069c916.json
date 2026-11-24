@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO dropped_fields_repair_queue\n                (engine_game_id, old_gcs_path, old_archive_version)\n            SELECT g.engine_game_id, g.gcs_path, g.archive_version\n            FROM games g\n            WHERE g.engine_game_id = ANY($1)\n              AND g.gcs_path LIKE 'games/1970/01/01/%'\n              AND g.archived_at IS NOT NULL\n            ON CONFLICT (engine_game_id) DO NOTHING\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "681e597efaa787c857320317c152895a321830cbc1fb338d6c970199b069c916"
+}

@@ -1,0 +1,83 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT r.disabled_at IS NOT NULL AS \"disabled!\", r.disabled_reason,\n                      r.health_consecutive_failures, r.health_consecutive_successes,\n                      r.health_last_failure, r.health_last_checked_at\n             FROM leaderboard_registrations r\n             JOIN leaderboard_entries le\n               ON le.leaderboard_id = r.leaderboard_id AND le.battlesnake_id = r.battlesnake_id\n             WHERE le.leaderboard_entry_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "disabled!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "disabled_reason",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "disabled_reason"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "health_consecutive_failures",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "health_consecutive_failures"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "health_consecutive_successes",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "health_consecutive_successes"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "health_last_failure",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "health_last_failure"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "health_last_checked_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "health_last_checked_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      true,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "9203101df81e0f6e2e1204b82184bbb40e4b0d914852b1da744d5c632a606f12"
+}

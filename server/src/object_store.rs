@@ -19,6 +19,13 @@ pub trait ObjectStore: Send + Sync {
     async fn put(&self, path: &str, bytes: Vec<u8>) -> cja::Result<()>;
     async fn get(&self, path: &str) -> cja::Result<Option<Vec<u8>>>;
 
+    /// Create the object only if the path is absent. `Ok(true)` = created,
+    /// `Ok(false)` = an object already exists (nothing written). Never
+    /// overwrites (DEV-2128: the bucket has no versioning, so a plain
+    /// `put` to an existing path is an irreversible overwrite). No default
+    /// impl — a get-then-put default would be racy.
+    async fn put_if_absent(&self, path: &str, bytes: Vec<u8>) -> cja::Result<bool>;
+
     /// Whether this store can do work. `false` only for
     /// [`DisabledObjectStore`]; lets callers (backup) fail fast before
     /// expensive work without reading bucket config themselves.
@@ -77,6 +84,30 @@ impl ObjectStore for GcsObjectStore {
         Ok(())
     }
 
+    async fn put_if_absent(&self, path: &str, bytes: Vec<u8>) -> cja::Result<bool> {
+        let upload_type = UploadType::Simple(Media::new(path.to_string()));
+        match gcs_client()
+            .await?
+            .upload_object(
+                &UploadObjectRequest {
+                    bucket: self.bucket.clone(),
+                    if_generation_match: Some(0),
+                    ..Default::default()
+                },
+                bytes,
+                &upload_type,
+            )
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(e) if is_precondition_failed(&e) => Ok(false),
+            Err(e) => Err(cja::color_eyre::eyre::eyre!(
+                "Failed to create object at GCS {}/{path}: {e}",
+                self.bucket
+            )),
+        }
+    }
+
     async fn get(&self, path: &str) -> cja::Result<Option<Vec<u8>>> {
         let client = gcs_client().await?;
         match client
@@ -105,6 +136,20 @@ fn is_not_found(err: &google_cloud_storage::http::Error) -> bool {
     matches!(err, google_cloud_storage::http::Error::Response(resp) if resp.code == 404)
 }
 
+/// GCS signals "object already exists" (ifGenerationMatch=0 refused) as
+/// HTTP 412 — as a JSON ErrorResponse when the body parses, or as a bare
+/// reqwest status error when it doesn't (check_response_status falls back
+/// to Error::HttpClient), so both variants mean 412 here.
+fn is_precondition_failed(err: &google_cloud_storage::http::Error) -> bool {
+    match err {
+        google_cloud_storage::http::Error::Response(resp) => resp.code == 412,
+        google_cloud_storage::http::Error::HttpClient(e) => {
+            e.status().is_some_and(|s| s.as_u16() == 412)
+        }
+        _ => false,
+    }
+}
+
 /// What AppState holds when no bucket is configured: every operation
 /// errors (call-time "GCS bucket not configured" failure, mapping to 500
 /// for archive reads) and `is_configured()` is false.
@@ -117,6 +162,10 @@ impl ObjectStore for DisabledObjectStore {
     }
 
     async fn get(&self, _path: &str) -> cja::Result<Option<Vec<u8>>> {
+        Err(cja::color_eyre::eyre::eyre!("GCS bucket not configured"))
+    }
+
+    async fn put_if_absent(&self, _path: &str, _bytes: Vec<u8>) -> cja::Result<bool> {
         Err(cja::color_eyre::eyre::eyre!("GCS bucket not configured"))
     }
 
@@ -175,6 +224,24 @@ impl ObjectStore for InMemoryObjectStore {
             .unwrap_or_else(|e| e.into_inner())
             .insert(path.to_string(), bytes);
         Ok(())
+    }
+
+    async fn put_if_absent(&self, path: &str, bytes: Vec<u8>) -> cja::Result<bool> {
+        if self
+            .fail_next_put
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(cja::color_eyre::eyre::eyre!("Injected storage failure"));
+        }
+        let mut objects = self.objects.lock().unwrap_or_else(|e| e.into_inner());
+        if objects.contains_key(path) {
+            return Ok(false);
+        }
+        objects.insert(path.to_string(), bytes);
+        // Counted only when the object is actually created, so put_count()
+        // stays a valid "no write happened" control for create-only paths.
+        self.puts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(true)
     }
 
     async fn get(&self, path: &str) -> cja::Result<Option<Vec<u8>>> {
@@ -259,6 +326,64 @@ mod tests {
         assert!(!store.is_configured());
         assert!(store.get("any").await.is_err());
         assert!(store.put("any", vec![]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn disabled_store_put_if_absent_errors() {
+        let store = DisabledObjectStore;
+        assert!(store.put_if_absent("any", vec![]).await.is_err());
+    }
+
+    /// put_if_absent creates once, then refuses without touching the bytes
+    /// or counting a put; the fault knob fires for it too.
+    #[tokio::test]
+    async fn put_if_absent_creates_then_refuses() {
+        let store = InMemoryObjectStore::default();
+        assert!(store.put_if_absent("p", vec![7]).await.unwrap());
+        assert_eq!(store.get("p").await.unwrap(), Some(vec![7]));
+
+        // An existing path is refused and nothing changes.
+        assert!(!store.put_if_absent("p", vec![9]).await.unwrap());
+        assert_eq!(
+            store.get("p").await.unwrap(),
+            Some(vec![7]),
+            "bytes unchanged"
+        );
+        assert_eq!(store.put_count(), 1, "the refused call counts nothing");
+
+        // The fault knob fires before the existence check and counts nothing.
+        store.fail_next_put();
+        assert!(store.put_if_absent("q", vec![1]).await.is_err());
+        assert_eq!(store.put_count(), 1);
+        assert_eq!(store.get("q").await.unwrap(), None);
+    }
+
+    /// The 412 classifier must accept both shapes google-cloud-storage
+    /// 0.22.1 produces: a JSON `ErrorResponse` and a bare reqwest status
+    /// error (check_response_status falls back to the latter when the
+    /// error body doesn't parse). The `HttpClient` arm can't be unit-
+    /// tested — `reqwest::Error` has no public constructor — so its
+    /// `as_u16()` comparison is covered by review here.
+    #[test]
+    fn is_precondition_failed_matches_both_412_variants() {
+        use google_cloud_storage::http::Error;
+        use google_cloud_storage::http::error::ErrorResponse;
+
+        let response = |code: u16| {
+            Error::Response(ErrorResponse {
+                code,
+                errors: vec![],
+                message: String::new(),
+            })
+        };
+        assert!(is_precondition_failed(&response(412)));
+        assert!(!is_precondition_failed(&response(404)));
+        assert!(!is_precondition_failed(&response(500)));
+        // Non-response variants are never a precondition failure.
+        let token_error = std::io::Error::other("unauth");
+        assert!(!is_precondition_failed(&Error::TokenSource(Box::new(
+            token_error
+        ))));
     }
 
     #[tokio::test]

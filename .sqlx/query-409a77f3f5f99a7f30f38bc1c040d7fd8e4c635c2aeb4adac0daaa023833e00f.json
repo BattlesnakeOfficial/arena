@@ -1,0 +1,173 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                battlesnake_id,\n                user_id,\n                name,\n                url,\n                visibility as \"visibility: _\",\n                engine_region as \"engine_region: _\",\n                color,\n                head,\n                tail,\n                created_at,\n                updated_at,\n                retired_at,\n                allow_tournament_import\n            FROM battlesnakes\n            WHERE battlesnake_id = ANY($1)\n              AND (user_id = $2 OR visibility = 'public')\n              AND deleted_at IS NULL\n              AND retired_at IS NULL\n            ORDER BY name ASC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "battlesnake_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "battlesnake_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "url",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "url"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "visibility: _",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "visibility"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "engine_region: _",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "engine_region"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "color",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "color"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "head",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "head"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "tail",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "tail"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "updated_at"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "retired_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "retired_at"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "allow_tournament_import",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "allow_tournament_import"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "409a77f3f5f99a7f30f38bc1c040d7fd8e4c635c2aeb4adac0daaa023833e00f"
+}
