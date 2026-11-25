@@ -831,6 +831,48 @@ pub async fn should_show_claim_prompt(pool: &PgPool, user_id: Uuid) -> cja::Resu
     Ok(show.unwrap_or(false))
 }
 
+/// Where an imported play snake (`snk_...`) lives now: its arena snake once
+/// the owner claimed it (unless since deleted), else its owner's claimed
+/// account, else just the owner's play username.
+#[derive(Debug)]
+pub struct PlaySnakeLink {
+    pub materialized_battlesnake_id: Option<Uuid>,
+    /// (GitHub login, user id) of whoever claimed the owner's play account.
+    pub claimant: Option<(String, Uuid)>,
+    pub play_username: String,
+}
+
+/// Look up an imported play snake by its play id. `None` for ids that were
+/// never imported (archived play snakes weren't).
+pub async fn play_snake_link(
+    pool: &PgPool,
+    play_snake_id: &str,
+) -> cja::Result<Option<PlaySnakeLink>> {
+    let row = sqlx::query!(
+        r#"
+        SELECT b.battlesnake_id AS "materialized_battlesnake_id?",
+               ia.username,
+               u.github_login AS "claimant_login?",
+               u.user_id AS "claimant_user_id?"
+        FROM imported_snakes s
+        JOIN imported_accounts ia ON ia.imported_account_id = s.imported_account_id
+        LEFT JOIN battlesnakes b
+          ON b.battlesnake_id = s.materialized_battlesnake_id AND b.deleted_at IS NULL
+        LEFT JOIN users u ON u.user_id = ia.claimed_by_user_id
+        WHERE s.play_snake_id = $1
+        "#,
+        play_snake_id,
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to look up imported play snake")?;
+    Ok(row.map(|row| PlaySnakeLink {
+        materialized_battlesnake_id: row.materialized_battlesnake_id,
+        claimant: row.claimant_login.zip(row.claimant_user_id),
+        play_username: row.username,
+    }))
+}
+
 /// The arena user (GitHub login, user id) who claimed the play account named
 /// `username`, for resolving old play profile links. Play usernames are
 /// matched case-insensitively, preferring an exact-case match.

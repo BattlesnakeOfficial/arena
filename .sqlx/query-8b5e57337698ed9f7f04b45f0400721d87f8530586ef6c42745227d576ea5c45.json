@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT leaderboard_id FROM leaderboards\n         WHERE name = $1 AND visibility = 'public'\n         ORDER BY disabled_at IS NULL DESC, created_at\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "leaderboard_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8b5e57337698ed9f7f04b45f0400721d87f8530586ef6c42745227d576ea5c45"
+}
