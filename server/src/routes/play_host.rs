@@ -111,6 +111,8 @@ pub fn play_router(app_state: AppState) -> Router {
     for (path, handler) in routes {
         router = route_both(router, path, handler);
     }
+    // The catch-all above never matches an empty tail.
+    router = route_both(router, "/webhook", any(webhook_gone));
     for (path, target) in MOVED {
         router = route_both(
             router,
@@ -351,7 +353,11 @@ fn segment(uri: &Uri, index: usize) -> &str {
         .unwrap_or_default()
 }
 
-/// A raw segment percent-decoded for a DB lookup; `None` if it isn't UTF-8.
+/// A raw segment percent-decoded for a DB lookup; `None` if it isn't UTF-8
+/// or holds a NUL, which Postgres text can't store (the query would only
+/// error).
 fn decoded(raw: &str) -> Option<Cow<'_, str>> {
-    urlencoding::decode(raw).ok()
+    urlencoding::decode(raw)
+        .ok()
+        .filter(|decoded| !decoded.contains('\0'))
 }

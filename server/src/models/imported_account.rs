@@ -832,8 +832,8 @@ pub async fn should_show_claim_prompt(pool: &PgPool, user_id: Uuid) -> cja::Resu
 }
 
 /// Where an imported play snake (`snk_...`) lives now: its arena snake once
-/// the owner claimed it, else its owner's claimed account, else just the
-/// owner's play username.
+/// the owner claimed it (unless since deleted), else its owner's claimed
+/// account, else just the owner's play username.
 #[derive(Debug)]
 pub struct PlaySnakeLink {
     pub materialized_battlesnake_id: Option<Uuid>,
@@ -850,12 +850,14 @@ pub async fn play_snake_link(
 ) -> cja::Result<Option<PlaySnakeLink>> {
     let row = sqlx::query!(
         r#"
-        SELECT s.materialized_battlesnake_id,
+        SELECT b.battlesnake_id AS "materialized_battlesnake_id?",
                ia.username,
                u.github_login AS "claimant_login?",
                u.user_id AS "claimant_user_id?"
         FROM imported_snakes s
         JOIN imported_accounts ia ON ia.imported_account_id = s.imported_account_id
+        LEFT JOIN battlesnakes b
+          ON b.battlesnake_id = s.materialized_battlesnake_id AND b.deleted_at IS NULL
         LEFT JOIN users u ON u.user_id = ia.claimed_by_user_id
         WHERE s.play_snake_id = $1
         "#,

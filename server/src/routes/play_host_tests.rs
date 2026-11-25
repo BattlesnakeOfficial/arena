@@ -156,6 +156,7 @@ const PLAY_URLS: &[&str] = &[
     "/webhook/gcp-alert/",
     "/webhook/github/",
     "/webhook/mailgun/",
+    "/webhook/",
     // §1.7 outside Django
     "/version",
     "/healthz/alive",
@@ -203,6 +204,10 @@ const PLAY_URLS: &[&str] = &[
     "/u/%FF/snake",
     "/leaderboard/standard/%0A/stats",
     "/rankings?page=%FF",
+    // A NUL can't reach Postgres (it would only log an error)
+    "/s/%00",
+    "/u/%00",
+    "/leaderboard/standard/%00/stats",
 ];
 
 /// Locations the play host may send people to besides arena itself.
@@ -589,9 +594,25 @@ async fn play_snake_ids_resolve_through_the_import(pool: PgPool) {
     play_snake(&pool, "Stayer", "snk_stayed", None).await;
     assert_redirect(&router, "/s/snk_stayed", &format!("{BASE}/u/Stayer")).await;
 
+    // Claimed, but the arena snake was deleted since: the owner's profile.
+    let deleted = create_snake(&pool, claimant, "deleted-snake").await;
+    sqlx::query("UPDATE battlesnakes SET deleted_at = now() WHERE battlesnake_id = $1")
+        .bind(deleted)
+        .execute(&pool)
+        .await
+        .unwrap();
+    play_snake(&pool, "mover", "snk_deleted", Some(deleted)).await;
+    assert_redirect(
+        &router,
+        "/s/snk_deleted",
+        &format!("{BASE}/users/claimant/{claimant}"),
+    )
+    .await;
+
     // Never imported, or not decodable: the fallback.
     assert_redirect(&router, "/s/snk_missing/", &format!("{BASE}/s/snk_missing")).await;
     assert_redirect(&router, "/s/%FF", &format!("{BASE}/s/%FF")).await;
+    assert_redirect(&router, "/s/%00", &format!("{BASE}/s/%00")).await;
 }
 
 #[sqlx::test(migrations = "../migrations")]
@@ -604,6 +625,8 @@ async fn webhooks_are_gone_for_any_method(pool: PgPool) {
         ("GET", "/webhook/engine/?id=x"),
         ("POST", "/webhook/engine/?id=x"),
         ("PUT", "/webhook/anything/else"),
+        ("POST", "/webhook"),
+        ("POST", "/webhook/"),
     ] {
         let response = send_with_host(&router, method, path, PLAY, &[]).await;
         assert_eq!(response.status(), StatusCode::GONE, "{method} {path}");

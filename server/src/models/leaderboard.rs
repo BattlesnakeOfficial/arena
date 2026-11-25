@@ -241,14 +241,15 @@ pub async fn get_leaderboard_by_id(
     Ok(row)
 }
 
-/// The public leaderboard named `name` (oldest first if somehow repeated).
+/// The public leaderboard named `name` (an enabled one first, then the
+/// oldest, if the name is somehow repeated).
 /// Names, not UUIDs, are what stay the same across prod, dev and tests: the
 /// seeded ladders ("Standard 11x11", ...) get random ids per database.
 pub async fn public_leaderboard_id_by_name(pool: &PgPool, name: &str) -> cja::Result<Option<Uuid>> {
     sqlx::query_scalar!(
         "SELECT leaderboard_id FROM leaderboards
          WHERE name = $1 AND visibility = 'public'
-         ORDER BY created_at
+         ORDER BY disabled_at IS NULL DESC, created_at
          LIMIT 1",
         name
     )

@@ -33,19 +33,12 @@ pub async fn play_profile(
     Path(username): Path<String>,
     page_factory: PageFactory,
 ) -> ServerResult<Response, StatusCode> {
-    if let Some((login, user_id)) =
-        imported_account::claimant_of_play_username(&state.db, &username).await?
+    // Postgres text can't hold a NUL, so no player's name has one; looking
+    // it up would only error.
+    if !username.contains('\0')
+        && let Some(path) = arena_profile_path(&state, &username).await?
     {
-        return Ok(Redirect::temporary(&format!("/users/{login}/{user_id}")).into_response());
-    }
-    if let Some(user) = user::get_user_by_github_login(&state.db, &username)
-        .await
-        .wrap_err("Failed to look up user for play profile link")?
-    {
-        return Ok(
-            Redirect::temporary(&format!("/users/{}/{}", user.github_login, user.user_id))
-                .into_response(),
-        );
+        return Ok(Redirect::temporary(&path).into_response());
     }
 
     Ok((
@@ -70,6 +63,19 @@ pub async fn play_profile(
         ),
     )
         .into_response())
+}
+
+/// The arena profile a play username lives at now, if any.
+async fn arena_profile_path(state: &AppState, username: &str) -> cja::Result<Option<String>> {
+    if let Some((login, user_id)) =
+        imported_account::claimant_of_play_username(&state.db, username).await?
+    {
+        return Ok(Some(format!("/users/{login}/{user_id}")));
+    }
+    Ok(user::get_user_by_github_login(&state.db, username)
+        .await
+        .wrap_err("Failed to look up user for play profile link")?
+        .map(|user| format!("/users/{}/{}", user.github_login, user.user_id)))
 }
 
 #[cfg(test)]
@@ -180,7 +186,7 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn unmoved_and_unknown_players_get_a_404_page(pool: PgPool) {
         play_account(&pool, "not-moved-yet", None).await;
-        for path in ["/u/not-moved-yet", "/profile/nobody-at-all"] {
+        for path in ["/u/not-moved-yet", "/profile/nobody-at-all", "/u/%00"] {
             let (status, location, body) = get(&pool, path).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
             assert_eq!(location, None);
