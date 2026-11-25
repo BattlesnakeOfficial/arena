@@ -605,18 +605,20 @@ async fn execute_call_routed(
                 region,
                 "health",
                 "response",
+                None,
                 Some(status),
             );
             CallOutcome::ProxyFault {
                 summary: format!("Engine proxy failed (HTTP {status})"),
             }
         }
-        ProxyCall::Fault { kind } => {
+        ProxyCall::Fault { kind, stage } => {
             log_proxy_fault(
                 &snake.battlesnake_id.to_string(),
                 region,
                 "health",
                 kind,
+                Some(stage),
                 None,
             );
             CallOutcome::ProxyFault {
