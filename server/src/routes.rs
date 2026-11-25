@@ -62,6 +62,9 @@ pub mod oauth;
 mod oauth_tests;
 pub mod og;
 pub mod pagination;
+pub mod play_host;
+#[cfg(test)]
+mod play_host_tests;
 pub mod play_links;
 pub mod play_notices;
 pub mod policy;
@@ -515,6 +518,14 @@ pub fn routes(app_state: AppState) -> cja::Result<cja::server::App> {
     if !engine_hosts.is_empty() {
         let engine = engine_host::engine_router(app_state.clone(), cors);
         app = app.host(engine_hosts, engine);
+    }
+
+    // Play hosts (default play.battlesnake.com) get redirects from old play
+    // URLs to this site, and nothing else: no pages, no sessions. Same
+    // dispatch and kill switch as the engine host.
+    let play_hosts = app_state.config.play_redirect_hosts.clone();
+    if !play_hosts.is_empty() {
+        app = app.host(play_hosts, play_host::play_router(app_state.clone()));
     }
     Ok(app)
 }

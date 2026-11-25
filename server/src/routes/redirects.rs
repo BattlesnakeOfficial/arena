@@ -28,6 +28,12 @@ pub const REDIRECTS: &[(&str, &str)] = &[
     ),
     // Blog
     ("/blog", "https://docs.battlesnake.com/blog"),
+    // Policy pages that live on the docs site now
+    ("/mission", "https://docs.battlesnake.com/policies/mission"),
+    (
+        "/diversity",
+        "https://docs.battlesnake.com/policies/diversity",
+    ),
     // Socials
     ("/bluesky", "https://bsky.app/profile/battlesnake.com"),
     ("/bsky", "https://bsky.app/profile/battlesnake.com"),
@@ -102,6 +108,22 @@ mod tests {
             assert!(
                 REDIRECTS.iter().all(|(p, _)| p != path),
                 "{path} is also an external short link"
+            );
+        }
+    }
+
+    #[test]
+    fn play_policy_pages_point_at_the_docs_site() {
+        for (path, target) in [
+            ("/mission", "https://docs.battlesnake.com/policies/mission"),
+            (
+                "/diversity",
+                "https://docs.battlesnake.com/policies/diversity",
+            ),
+        ] {
+            assert!(
+                REDIRECTS.contains(&(path, target)),
+                "{path} must redirect to {target}"
             );
         }
     }

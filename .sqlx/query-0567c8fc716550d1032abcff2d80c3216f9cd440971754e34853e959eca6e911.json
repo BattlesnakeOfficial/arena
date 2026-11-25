@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT s.materialized_battlesnake_id,\n               ia.username,\n               u.github_login AS \"claimant_login?\",\n               u.user_id AS \"claimant_user_id?\"\n        FROM imported_snakes s\n        JOIN imported_accounts ia ON ia.imported_account_id = s.imported_account_id\n        LEFT JOIN users u ON u.user_id = ia.claimed_by_user_id\n        WHERE s.play_snake_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "materialized_battlesnake_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "imported_snakes",
+            "name": "materialized_battlesnake_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "username",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "imported_accounts",
+            "name": "username"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "claimant_login?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "github_login"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "claimant_user_id?",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "0567c8fc716550d1032abcff2d80c3216f9cd440971754e34853e959eca6e911"
+}

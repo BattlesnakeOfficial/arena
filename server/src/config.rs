@@ -28,6 +28,10 @@ pub const ARENA_PUBLIC_BASE_URL: &str = "https://arena.battlesnake.com";
 /// ([`AppConfig::engine_api_hosts`]).
 pub const DEFAULT_ENGINE_API_HOSTS: &[&str] = &["engine.battlesnake.com"];
 
+/// Default hosts answered by the play.battlesnake.com redirect router
+/// ([`AppConfig::play_redirect_hosts`]).
+pub const DEFAULT_PLAY_REDIRECT_HOSTS: &[&str] = &["play.battlesnake.com"];
+
 /// Default for [`JobConfig::shutdown_drain_secs`].
 pub const DEFAULT_JOB_SHUTDOWN_DRAIN_SECS: u64 = 4;
 /// Default for `ARENA_JOB_RECLAIM_WINDOW_SECS`: 240 seconds tolerates roughly 30-second
@@ -245,6 +249,10 @@ pub struct AppConfig {
     /// Host values routed to the legacy-engine read API (env `ENGINE_API_HOSTS`,
     /// comma-separated; unset/empty = default; set `disabled.invalid` to disable).
     pub engine_api_hosts: Vec<String>,
+    /// Host values whose requests are redirected from old play.battlesnake.com
+    /// paths to this site (env `PLAY_REDIRECT_HOSTS`, same format and kill
+    /// switch as `ENGINE_API_HOSTS`). Never contains `base_url`'s host.
+    pub play_redirect_hosts: Vec<String>,
 
     // Optional services
     pub engine_database_url: Option<String>,
@@ -383,20 +391,50 @@ fn resolve_base_url(configured: Option<String>, gcp_logging: bool) -> String {
     })
 }
 
-/// Pure parser for `ENGINE_API_HOSTS`: `None`/empty → default list; split,
-/// trim, lowercase, drop empty segments (`" , "` → routing disabled, an
-/// acceptable kill switch alongside `disabled.invalid`).
-fn parse_engine_api_hosts(raw: Option<String>) -> Vec<String> {
+/// Pure parser for a host-list env var (`ENGINE_API_HOSTS`,
+/// `PLAY_REDIRECT_HOSTS`): `None`/empty → `default`; split, trim, lowercase,
+/// drop empty segments (`" , "` → routing disabled, an acceptable kill switch
+/// alongside `disabled.invalid`).
+fn parse_hosts(raw: Option<String>, default: &[&str]) -> Vec<String> {
     non_empty(raw)
-        .unwrap_or_else(|| DEFAULT_ENGINE_API_HOSTS.join(","))
+        .unwrap_or_else(|| default.join(","))
         .split(',')
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| !s.is_empty())
         .collect()
 }
 
+fn parse_engine_api_hosts(raw: Option<String>) -> Vec<String> {
+    parse_hosts(raw, DEFAULT_ENGINE_API_HOSTS)
+}
+
 fn engine_api_hosts_from_env() -> Vec<String> {
     parse_engine_api_hosts(std::env::var("ENGINE_API_HOSTS").ok())
+}
+
+fn parse_play_redirect_hosts(raw: Option<String>) -> Vec<String> {
+    parse_hosts(raw, DEFAULT_PLAY_REDIRECT_HOSTS)
+}
+
+/// Refuse to boot when this site's own host is a play-redirect host: every
+/// request would redirect to `base_url`, which would redirect again, forever.
+fn check_play_redirect_hosts(base_url: &str, play_hosts: &[String]) -> cja::Result<()> {
+    let Some(host) = url::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+    else {
+        return Ok(());
+    };
+    let host = host.trim_end_matches('.');
+    if play_hosts
+        .iter()
+        .any(|play| play.trim_end_matches('.') == host)
+    {
+        return Err(cja::color_eyre::eyre::eyre!(
+            "BASE_URL host {host} is listed in PLAY_REDIRECT_HOSTS; that would redirect to itself forever"
+        ));
+    }
+    Ok(())
 }
 
 impl AppConfig {
@@ -428,6 +466,11 @@ impl AppConfig {
         };
         validate_job_lease(&job)?;
 
+        let base_url = resolve_base_url(optional_env("BASE_URL"), gcp_logging);
+        let play_redirect_hosts =
+            parse_play_redirect_hosts(std::env::var("PLAY_REDIRECT_HOSTS").ok());
+        check_play_redirect_hosts(&base_url, &play_redirect_hosts)?;
+
         Ok(Self {
             database_url,
             pg_max_connections: parse_env("ARENA_PG_MAX_CONNECTIONS", 5),
@@ -437,8 +480,9 @@ impl AppConfig {
             )
             .max(1),
             play_shutdown_notices_enabled: parse_env("PLAY_SHUTDOWN_NOTICES_ENABLED", false),
-            base_url: resolve_base_url(optional_env("BASE_URL"), gcp_logging),
+            base_url,
             engine_api_hosts: engine_api_hosts_from_env(),
+            play_redirect_hosts,
 
             engine_database_url: optional_env("ENGINE_DATABASE_URL"),
             gcs_bucket: optional_env("GCS_BUCKET"),
@@ -507,6 +551,10 @@ impl AppConfig {
             play_shutdown_notices_enabled: false,
             base_url: LOCAL_BASE_URL.to_string(),
             engine_api_hosts: DEFAULT_ENGINE_API_HOSTS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            play_redirect_hosts: DEFAULT_PLAY_REDIRECT_HOSTS
                 .iter()
                 .map(|s| (*s).to_string())
                 .collect(),
@@ -798,6 +846,56 @@ mod tests {
             parse_engine_api_hosts(Some("disabled.invalid".to_string())),
             vec!["disabled.invalid".to_string()]
         );
+    }
+
+    #[test]
+    fn parse_play_redirect_hosts_semantics() {
+        let default = vec!["play.battlesnake.com".to_string()];
+        assert_eq!(parse_play_redirect_hosts(None), default);
+        assert_eq!(parse_play_redirect_hosts(Some(String::new())), default);
+        assert_eq!(
+            parse_play_redirect_hosts(Some(" , ".to_string())),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            parse_play_redirect_hosts(Some(" Play.Battlesnake.COM , battlesnake.com ".to_string())),
+            vec![
+                "play.battlesnake.com".to_string(),
+                "battlesnake.com".to_string()
+            ]
+        );
+        assert_eq!(
+            parse_play_redirect_hosts(Some("disabled.invalid".to_string())),
+            vec!["disabled.invalid".to_string()]
+        );
+        assert_eq!(
+            AppConfig::test_default().play_redirect_hosts,
+            vec!["play.battlesnake.com"]
+        );
+    }
+
+    #[test]
+    fn boot_refuses_a_base_url_on_a_play_redirect_host() {
+        let play = parse_play_redirect_hosts(None);
+        for base_url in [
+            "https://play.battlesnake.com",
+            "https://PLAY.battlesnake.com/",
+            "https://play.battlesnake.com.:443",
+            "http://play.battlesnake.com:8080",
+        ] {
+            let err = check_play_redirect_hosts(base_url, &play).unwrap_err();
+            assert!(
+                err.to_string().contains("PLAY_REDIRECT_HOSTS"),
+                "{base_url}"
+            );
+        }
+        let trailing_dot = vec!["play.battlesnake.com.".to_string()];
+        assert!(check_play_redirect_hosts("https://play.battlesnake.com", &trailing_dot).is_err());
+
+        for base_url in [ARENA_PUBLIC_BASE_URL, LOCAL_BASE_URL, "not a url"] {
+            check_play_redirect_hosts(base_url, &play).unwrap();
+        }
+        check_play_redirect_hosts("https://play.battlesnake.com", &[]).unwrap();
     }
 
     #[test]
