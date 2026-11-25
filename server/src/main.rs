@@ -51,6 +51,7 @@ mod placement;
 mod play_history_walk;
 mod play_import;
 mod play_shutdown_notices;
+mod proxy_connect_telemetry;
 mod routes;
 mod scoring;
 mod secrets;

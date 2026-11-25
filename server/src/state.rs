@@ -163,17 +163,32 @@ impl AppState {
             .build()
             .wrap_err("Failed to create HTTP client")?;
         tracing::info!("HTTP client initialized for snake API calls");
-        let proxy_client = |timeout| -> cja::Result<reqwest::Client> {
+        let proxy_client = |region, timeout| -> cja::Result<reqwest::Client> {
             crate::snake_client::client_builder()
                 .timeout(timeout)
                 .pool_max_idle_per_host(80)
+                .connector_layer(
+                    crate::proxy_connect_telemetry::ProxyConnectTelemetryLayer::new(region),
+                )
                 .build()
                 .wrap_err("Failed to create engine proxy client")
         };
-        let proxy_east_client = proxy_client(std::time::Duration::from_secs(2))?;
-        let proxy_europe_client = proxy_client(std::time::Duration::from_secs(2))?;
-        let proxy_east_health_client = proxy_client(std::time::Duration::from_secs(6))?;
-        let proxy_europe_health_client = proxy_client(std::time::Duration::from_secs(6))?;
+        let proxy_east_client = proxy_client(
+            crate::models::battlesnake::EngineRegion::UsEast4,
+            std::time::Duration::from_secs(2),
+        )?;
+        let proxy_europe_client = proxy_client(
+            crate::models::battlesnake::EngineRegion::EuropeWest4,
+            std::time::Duration::from_secs(2),
+        )?;
+        let proxy_east_health_client = proxy_client(
+            crate::models::battlesnake::EngineRegion::UsEast4,
+            std::time::Duration::from_secs(6),
+        )?;
+        let proxy_europe_health_client = proxy_client(
+            crate::models::battlesnake::EngineRegion::EuropeWest4,
+            std::time::Duration::from_secs(6),
+        )?;
         if config.engine_proxy.token.is_none() {
             tracing::warn!(
                 "ENGINE_PROXY_AUTH_TOKEN is unset; regional snakes will be called directly"

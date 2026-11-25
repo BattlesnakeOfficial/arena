@@ -12,6 +12,7 @@ use crate::config::EngineProxyConfig;
 use crate::engine::EngineGame;
 use crate::engine::frame::SnakeCustomizations;
 use crate::models::battlesnake::EngineRegion;
+use crate::proxy_connect_telemetry::connects_in_flight;
 use crate::wire;
 use uuid::Uuid;
 
@@ -158,15 +159,18 @@ pub(crate) fn classify_proxy_response(
 /// `snake_id` is the id the call was made for: the game_battlesnake_id in
 /// games (like every other snake-call WARN), the battlesnake_id for health
 /// probes (their test games use synthetic ids). `call` is the endpoint
-/// (move/start/end/info/health); `kind` is how the proxy failed.
+/// (move/start/end/info/health); `kind` is how the proxy failed; `stage`
+/// (Fault kinds only) is how far the call got before it failed.
 pub(crate) fn log_proxy_fault(
     snake_id: &str,
     region: EngineRegion,
     call: &str,
     kind: &str,
+    stage: Option<&str>,
     status: Option<StatusCode>,
 ) {
-    tracing::warn!(snake_id, region = region.as_str(), call, kind, status = ?status,
+    tracing::warn!(snake_id, region = region.as_str(), call, kind, stage, status = ?status,
+        connects_in_flight = connects_in_flight(region),
         "Engine proxy fault, using fallback");
 }
 
@@ -201,6 +205,9 @@ pub(crate) enum ProxyCall {
     },
     Fault {
         kind: &'static str,
+        /// Where the call stalled or broke: `awaiting_headers` (no response
+        /// head yet, which includes opening a connection) or `reading_body`.
+        stage: &'static str,
     },
 }
 
@@ -208,8 +215,10 @@ pub(crate) async fn execute_proxy(
     builder: reqwest::RequestBuilder,
     timeout: Duration,
 ) -> ProxyCall {
+    let mut headers_received = false;
     let result = tokio::time::timeout(timeout + PROXY_TRANSIT_MARGIN, async {
         let response = builder.send().await?;
+        headers_received = true;
         let status = response.status();
         let class = classify_proxy_response(status, response.headers());
         // A proxy-auth rejection is a proxy response, not snake content.
@@ -223,15 +232,24 @@ pub(crate) async fn execute_proxy(
         Ok::<_, reqwest::Error>((class, status, body))
     })
     .await;
+    let stage = if headers_received {
+        "reading_body"
+    } else {
+        "awaiting_headers"
+    };
     match result {
         Ok(Ok((class, status, body))) => ProxyCall::Response {
             class,
             status,
             body,
         },
-        Ok(Err(_)) => ProxyCall::Fault { kind: "transport" },
+        Ok(Err(_)) => ProxyCall::Fault {
+            kind: "transport",
+            stage,
+        },
         Err(_) => ProxyCall::Fault {
             kind: "local guard",
+            stage,
         },
     }
 }
@@ -528,10 +546,28 @@ fn retry_outcome(result: &MoveResult) -> &'static str {
 /// retry, after the direct call returns, so the outcome is the real one.
 /// `kind` is "transport" | "local guard" | "response"; `proxy_status` is
 /// the proxy's HTTP status when it answered (None for Fault kinds).
+/// A /move proxy fault as observed when it happened, before the direct retry
+/// runs: `connects_in_flight` is read at fault time, not after the retry.
+struct ProxyFaultContext {
+    kind: &'static str,
+    stage: Option<&'static str>,
+    connects_in_flight: usize,
+}
+
+impl ProxyFaultContext {
+    fn now(region: EngineRegion, kind: &'static str, stage: Option<&'static str>) -> Self {
+        Self {
+            kind,
+            stage,
+            connects_in_flight: connects_in_flight(region),
+        }
+    }
+}
+
 fn log_proxy_fault_retry(
     snake_id: &str,
     region: EngineRegion,
-    kind: &str,
+    fault: ProxyFaultContext,
     proxy_status: Option<StatusCode>,
     result: &MoveResult,
 ) {
@@ -539,7 +575,9 @@ fn log_proxy_fault_retry(
         snake_id,
         region = region.as_str(),
         call = "move",
-        kind,
+        kind = fault.kind,
+        stage = fault.stage,
+        connects_in_flight = fault.connects_in_flight,
         status = proxy_status.map(|s| s.as_u16()),
         metric_type = "proxy_fault_retry",
         outcome = retry_outcome(result),
@@ -659,6 +697,7 @@ pub async fn request_move_routed(
             status,
             ..
         } => {
+            let fault = ProxyFaultContext::now(endpoint.engine_region, "response", None);
             let result = retry_move_direct(
                 clients,
                 endpoint,
@@ -672,13 +711,14 @@ pub async fn request_move_routed(
             log_proxy_fault_retry(
                 &endpoint.snake_id,
                 endpoint.engine_region,
-                "response",
+                fault,
                 Some(status),
                 &result,
             );
             result
         }
-        ProxyCall::Fault { kind } => {
+        ProxyCall::Fault { kind, stage } => {
+            let fault = ProxyFaultContext::now(endpoint.engine_region, kind, Some(stage));
             let result = retry_move_direct(
                 clients,
                 endpoint,
@@ -692,7 +732,7 @@ pub async fn request_move_routed(
             log_proxy_fault_retry(
                 &endpoint.snake_id,
                 endpoint.engine_region,
-                kind,
+                fault,
                 None,
                 &result,
             );
@@ -797,12 +837,18 @@ async fn request_lifecycle_routed(
                 endpoint.engine_region,
                 path,
                 "response",
+                None,
                 Some(status),
             );
         }
-        ProxyCall::Fault { kind } => {
-            log_proxy_fault(&endpoint.snake_id, endpoint.engine_region, path, kind, None)
-        }
+        ProxyCall::Fault { kind, stage } => log_proxy_fault(
+            &endpoint.snake_id,
+            endpoint.engine_region,
+            path,
+            kind,
+            Some(stage),
+            None,
+        ),
         ProxyCall::Response { .. } => {}
     }
 }
@@ -859,16 +905,18 @@ pub async fn request_info_routed(
                 endpoint.engine_region,
                 "info",
                 "response",
+                None,
                 Some(status),
             );
             None
         }
-        ProxyCall::Fault { kind } => {
+        ProxyCall::Fault { kind, stage } => {
             log_proxy_fault(
                 &endpoint.snake_id,
                 endpoint.engine_region,
                 "info",
                 kind,
+                Some(stage),
                 None,
             );
             None
